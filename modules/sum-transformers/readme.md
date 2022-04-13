@@ -1,5 +1,32 @@
 # Text Summarization Module
 
+#### Schema
+
+```json
+schema = {
+  "classes": [{
+    "class": "Article",
+    "description": "A written text, for example a news article or blog post",
+    "properties": [
+      {
+        "dataType": [
+          "string"
+        ],
+        "description": "Title of the article",
+        "name": "title"
+      },
+      {
+        "dataType": [
+          "text"
+        ],
+        "description": "The content of the article",
+        "name": "content"
+      }
+    ]
+  }]
+}
+```
+
 ## Design
 
 #### Query
