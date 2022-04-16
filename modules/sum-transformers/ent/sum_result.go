@@ -9,11 +9,13 @@
 //  CONTACT: hello@semi.technology
 //
 
-package models
+package ent
 
-// Answer used in qna module to represent
-// the answer to a given question
-type Summary struct {
-	Result   *string `json:"result,omitempty"`
-	Property *string `json:"property,omitempty"`
+type SummaryResult struct {
+	Property string
+	Result   string
+}
+
+type SumResult struct {
+	Summary []SummaryResult
 }

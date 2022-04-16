@@ -17,11 +17,11 @@ import (
 	"os"
 	"time"
 
-	sumadditional "github.com/DasithEdirisinghe/weaviate/tree/text-summarization-module/modules/sum-transformers/additional"
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/entities/modulecapabilities"
 	"github.com/semi-technologies/weaviate/entities/moduletools"
-	sumadditionaltoken "github.com/semi-technologies/weaviate/modules/sum-transformers/additional/tokens"
+	sumadditional "github.com/semi-technologies/weaviate/modules/sum-transformers/additional"
+	sumadditionalsummary "github.com/semi-technologies/weaviate/modules/sum-transformers/additional/summary"
 	"github.com/semi-technologies/weaviate/modules/sum-transformers/clients"
 	"github.com/semi-technologies/weaviate/modules/sum-transformers/ent"
 	"github.com/sirupsen/logrus"
@@ -67,7 +67,7 @@ func (m *SUMModule) initAdditional(ctx context.Context,
 
 	m.sum = client
 
-	tokenProvider := sumadditionaltoken.New(m.sum)
+	tokenProvider := sumadditionalsummary.New(m.sum)
 	m.additionalPropertiesProvider = sumadditional.New(tokenProvider)
 
 	return nil

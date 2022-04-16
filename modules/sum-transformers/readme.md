@@ -31,6 +31,7 @@ schema = {
 
 #### Query
 
+
 ```json
 {
     Get {
