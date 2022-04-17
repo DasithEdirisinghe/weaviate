@@ -24,6 +24,7 @@ import (
 	"github.com/semi-technologies/weaviate/adapters/repos/db/aggregator"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted/stopwords"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw"
 	"github.com/semi-technologies/weaviate/entities/additional"
 	"github.com/semi-technologies/weaviate/entities/aggregation"
 	"github.com/semi-technologies/weaviate/entities/filters"
@@ -31,11 +32,11 @@ import (
 	"github.com/semi-technologies/weaviate/entities/multi"
 	"github.com/semi-technologies/weaviate/entities/schema"
 	"github.com/semi-technologies/weaviate/entities/search"
+	"github.com/semi-technologies/weaviate/entities/searchparams"
 	"github.com/semi-technologies/weaviate/entities/storobj"
 	"github.com/semi-technologies/weaviate/usecases/objects"
 	schemaUC "github.com/semi-technologies/weaviate/usecases/schema"
 	"github.com/semi-technologies/weaviate/usecases/sharding"
-	"github.com/semi-technologies/weaviate/usecases/traverser"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 )
@@ -72,8 +73,11 @@ func NewIndex(ctx context.Context, config IndexConfig,
 	vectorIndexUserConfig schema.VectorIndexConfig, sg schemaUC.SchemaGetter,
 	cs inverted.ClassSearcher, logger logrus.FieldLogger,
 	nodeResolver nodeResolver, remoteClient sharding.RemoteIndexClient) (*Index, error) {
-	// TODO: can't error with hard-coded preset, needs checking once configurable
-	sd, _ := stopwords.NewDetectorFromPreset("")
+	sd, err := stopwords.NewDetectorFromConfig(invertedIndexConfig.Stopwords)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create new index")
+	}
+
 	index := &Index{
 		Config:                config,
 		Shards:                map[string]*Shard{},
@@ -82,7 +86,7 @@ func NewIndex(ctx context.Context, config IndexConfig,
 		classSearcher:         cs,
 		vectorIndexUserConfig: vectorIndexUserConfig,
 		invertedIndexConfig:   invertedIndexConfig,
-		stopwords:             sd, // TODO: take preset from config, reflect additions and removals
+		stopwords:             sd,
 		remote: sharding.NewRemoteIndex(config.ClassName.String(), sg,
 			nodeResolver, remoteClient),
 	}
@@ -165,6 +169,7 @@ func (i *Index) updateInvertedIndexConfig(ctx context.Context,
 type IndexConfig struct {
 	RootPath                  string
 	ClassName                 schema.ClassName
+	QueryMaximumResults       int64
 	DiskUseWarningPercentage  uint64
 	DiskUseReadOnlyPercentage uint64
 }
@@ -634,45 +639,58 @@ func (i *Index) IncomingExists(ctx context.Context, shardName string,
 }
 
 func (i *Index) objectSearch(ctx context.Context, limit int,
-	filters *filters.LocalFilter, keywordRanking *traverser.KeywordRankingParams,
+	filters *filters.LocalFilter, keywordRanking *searchparams.KeywordRanking,
 	additional additional.Properties) ([]*storobj.Object, error) {
 	shardNames := i.getSchema.ShardingState(i.Config.ClassName.String()).
 		AllPhysicalShards()
 
-	out := make([]*storobj.Object, 0, len(shardNames)*limit)
+	outObjects := make([]*storobj.Object, 0, len(shardNames)*limit)
+	outScores := make([]float32, 0, len(shardNames)*limit)
 	for _, shardName := range shardNames {
 		local := i.getSchema.
 			ShardingState(i.Config.ClassName.String()).
 			IsShardLocal(shardName)
 
-		var res []*storobj.Object
+		var objs []*storobj.Object
+		var scores []float32
 		var err error
 
 		if local {
 			shard := i.Shards[shardName]
-			res, err = shard.objectSearch(ctx, limit, filters, keywordRanking, additional)
+			objs, scores, err = shard.objectSearch(ctx, limit, filters, keywordRanking, additional)
 			if err != nil {
 				return nil, errors.Wrapf(err, "shard %s", shard.ID())
 			}
 
 		} else {
-			res, _, err = i.remote.SearchShard(ctx, shardName, nil, limit, filters, additional)
+			objs, scores, err = i.remote.SearchShard(
+				ctx, shardName, nil, limit, filters, keywordRanking, additional)
 			if err != nil {
 				return nil, errors.Wrapf(err, "remote shard %s", shardName)
 			}
 		}
-		out = append(out, res...)
+		outObjects = append(outObjects, objs...)
+		outScores = append(outScores, scores...)
 	}
 
-	if len(out) > limit {
-		out = out[:limit]
+	if keywordRanking != nil {
+		res := &inverted.RankedResults{
+			Objects: outObjects,
+			Scores:  outScores,
+		}
+		sort.Sort(res)
+		outObjects = res.Objects
 	}
 
-	return out, nil
+	if len(outObjects) > limit {
+		outObjects = outObjects[:limit]
+	}
+
+	return outObjects, nil
 }
 
 func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
-	limit int, filters *filters.LocalFilter,
+	dist float32, limit int, filters *filters.LocalFilter,
 	additional additional.Properties) ([]*storobj.Object, []float32, error) {
 	shardNames := i.getSchema.ShardingState(i.Config.ClassName.String()).
 		AllPhysicalShards()
@@ -680,8 +698,17 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 	errgrp := &errgroup.Group{}
 	m := &sync.Mutex{}
 
-	out := make([]*storobj.Object, 0, len(shardNames)*limit)
-	dists := make([]float32, 0, len(shardNames)*limit)
+	// a limit of -1 is used to signal a search by distance. if that is
+	// the case we have to adjust how we calculate the outpout capacity
+	var shardCap int
+	if limit < 0 {
+		shardCap = len(shardNames) * hnsw.DefaultSearchByDistInitialLimit
+	} else {
+		shardCap = len(shardNames) * limit
+	}
+
+	out := make([]*storobj.Object, 0, shardCap)
+	dists := make([]float32, 0, shardCap)
 	for _, shardName := range shardNames {
 		shardName := shardName
 		errgrp.Go(func() error {
@@ -695,13 +722,14 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 
 			if local {
 				shard := i.Shards[shardName]
-				res, resDists, err = shard.objectVectorSearch(ctx, searchVector, limit, filters, additional)
+				res, resDists, err = shard.objectVectorSearch(
+					ctx, searchVector, dist, limit, filters, additional)
 				if err != nil {
 					return errors.Wrapf(err, "shard %s", shard.ID())
 				}
-
 			} else {
-				res, resDists, err = i.remote.SearchShard(ctx, shardName, searchVector, limit, filters, additional)
+				res, resDists, err = i.remote.SearchShard(
+					ctx, shardName, searchVector, limit, filters, nil, additional)
 				if err != nil {
 					return errors.Wrapf(err, "remote shard %s", shardName)
 				}
@@ -735,25 +763,25 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 }
 
 func (i *Index) IncomingSearch(ctx context.Context, shardName string,
-	searchVector []float32, limit int, filters *filters.LocalFilter,
+	searchVector []float32, distance float32, limit int, filters *filters.LocalFilter,
+	keywordRanking *searchparams.KeywordRanking,
 	additional additional.Properties) ([]*storobj.Object, []float32, error) {
 	shard, ok := i.Shards[shardName]
 	if !ok {
 		return nil, nil, errors.Errorf("shard %q does not exist locally", shardName)
 	}
 
-	// TODO: support BM25 on sharded search
 	if searchVector == nil {
-		res, err := shard.objectSearch(ctx, limit, filters, nil, additional)
+		res, scores, err := shard.objectSearch(ctx, limit, filters, keywordRanking, additional)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "shard %s", shard.ID())
 		}
 
-		// no distances on non-vector searches
-		return res, nil, nil
+		return res, scores, nil
 	}
 
-	res, resDists, err := shard.objectVectorSearch(ctx, searchVector, limit, filters, additional)
+	res, resDists, err := shard.objectVectorSearch(
+		ctx, searchVector, distance, limit, filters, additional)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "shard %s", shard.ID())
 	}

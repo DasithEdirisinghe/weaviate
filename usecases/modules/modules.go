@@ -92,6 +92,17 @@ func (m *Provider) Init(ctx context.Context,
 		}
 	}
 	for i, mod := range m.GetAll() {
+		if modExtension, ok := mod.(modulecapabilities.ModuleExtension); ok {
+			if err := modExtension.InitExtension(m.GetAllExclude(mod.Name())); err != nil {
+				return errors.Wrapf(err, "init module extension %d (%q)", i, mod.Name())
+			} else {
+				logger.WithField("action", "startup").
+					WithField("module", mod.Name()).
+					Debug("initialized module extension")
+			}
+		}
+	}
+	for i, mod := range m.GetAll() {
 		if modDependency, ok := mod.(modulecapabilities.ModuleDependency); ok {
 			if err := modDependency.InitDependency(m.GetAllExclude(mod.Name())); err != nil {
 				return errors.Wrapf(err, "init module dependency %d (%q)", i, mod.Name())
@@ -226,6 +237,23 @@ func (m *Provider) GetArguments(class *models.Class) map[string]*graphql.Argumen
 				for name, argument := range arg.Arguments() {
 					if argument.GetArgumentsFunction != nil {
 						arguments[name] = argument.GetArgumentsFunction(class.Class)
+					}
+				}
+			}
+		}
+	}
+	return arguments
+}
+
+// AggregateArguments provides GraphQL Aggregate arguments
+func (m *Provider) AggregateArguments(class *models.Class) map[string]*graphql.ArgumentConfig {
+	arguments := map[string]*graphql.ArgumentConfig{}
+	for _, module := range m.GetAll() {
+		if m.shouldIncludeClassArgument(class, module.Name()) {
+			if arg, ok := module.(modulecapabilities.GraphQLArguments); ok {
+				for name, argument := range arg.Arguments() {
+					if argument.AggregateArgumentsFunction != nil {
+						arguments[name] = argument.AggregateArgumentsFunction(class.Class)
 					}
 				}
 			}

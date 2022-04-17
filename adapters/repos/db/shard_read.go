@@ -26,8 +26,8 @@ import (
 	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/multi"
 	"github.com/semi-technologies/weaviate/entities/search"
+	"github.com/semi-technologies/weaviate/entities/searchparams"
 	"github.com/semi-technologies/weaviate/entities/storobj"
-	"github.com/semi-technologies/weaviate/usecases/traverser"
 	"github.com/sirupsen/logrus"
 )
 
@@ -157,11 +157,11 @@ func (s *Shard) vectorByIndexID(ctx context.Context, indexID uint64) ([]float32,
 }
 
 func (s *Shard) objectSearch(ctx context.Context, limit int,
-	filters *filters.LocalFilter, keywordRanking *traverser.KeywordRankingParams,
-	additional additional.Properties) ([]*storobj.Object, error) {
+	filters *filters.LocalFilter, keywordRanking *searchparams.KeywordRanking,
+	additional additional.Properties) ([]*storobj.Object, []float32, error) {
 	if keywordRanking != nil {
 		if v := s.versioner.Version(); v < 2 {
-			return nil, errors.Errorf("shard was built with an older version of " +
+			return nil, nil, errors.Errorf("shard was built with an older version of " +
 				"Weaviate which does not yet support BM25 search")
 		}
 
@@ -175,39 +175,56 @@ func (s *Shard) objectSearch(ctx context.Context, limit int,
 	}
 
 	if filters == nil {
-		return s.objectList(ctx, limit, additional)
+		objs, err := s.objectList(ctx, limit, additional)
+		return objs, nil, err
 	}
-	return inverted.NewSearcher(s.store, s.index.getSchema.GetSchemaSkipAuth(),
+	objs, err := inverted.NewSearcher(s.store, s.index.getSchema.GetSchemaSkipAuth(),
 		s.invertedRowCache, s.propertyIndices, s.index.classSearcher,
-		s.deletedDocIDs, s.versioner.Version()).
+		s.deletedDocIDs, s.index.stopwords, s.versioner.Version()).
 		Object(ctx, limit, filters, additional, s.index.Config.ClassName)
+	return objs, nil, err
 }
 
-func (s *Shard) objectVectorSearch(ctx context.Context, searchVector []float32,
-	limit int, filters *filters.LocalFilter, additional additional.Properties) ([]*storobj.Object, []float32, error) {
-	var allowList helpers.AllowList
-	beforeAll := time.Now()
-	if filters != nil {
-		list, err := inverted.NewSearcher(s.store, s.index.getSchema.GetSchemaSkipAuth(),
-			s.invertedRowCache, s.propertyIndices, s.index.classSearcher,
-			s.deletedDocIDs, s.versioner.Version()).
-			DocIDs(ctx, filters, additional, s.index.Config.ClassName)
-		if err != nil {
-			return nil, nil, errors.Wrap(err, "build inverted filter allow list")
-		}
+func (s *Shard) objectVectorSearch(ctx context.Context,
+	searchVector []float32, targetDist float32, limit int, filters *filters.LocalFilter,
+	additional additional.Properties) ([]*storobj.Object, []float32, error) {
+	var (
+		ids       []uint64
+		dists     []float32
+		err       error
+		allowList helpers.AllowList
+	)
 
+	beforeAll := time.Now()
+
+	if filters != nil {
+		list, err := s.buildAllowList(ctx, filters, additional)
+		if err != nil {
+			return nil, nil, err
+		}
 		allowList = list
 	}
+
+	if limit < 0 {
+		ids, dists, err = s.vectorIndex.SearchByVectorDistance(
+			searchVector, targetDist, s.index.Config.QueryMaximumResults, allowList)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "vector search by distance")
+		}
+	} else {
+		ids, dists, err = s.vectorIndex.SearchByVector(searchVector, limit, allowList)
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "vector search")
+		}
+	}
+
 	invertedTook := time.Since(beforeAll)
 	beforeVector := time.Now()
-	ids, dists, err := s.vectorIndex.SearchByVector(searchVector, limit, allowList)
-	if err != nil {
-		return nil, nil, errors.Wrap(err, "vector search")
-	}
 
 	if len(ids) == 0 {
 		return nil, nil, nil
 	}
+
 	hnswTook := time.Since(beforeVector)
 	beforeObjects := time.Now()
 
@@ -281,4 +298,17 @@ func (s *Shard) objectList(ctx context.Context, limit int,
 	}
 
 	return out[:i], nil
+}
+
+func (s *Shard) buildAllowList(ctx context.Context, filters *filters.LocalFilter,
+	addl additional.Properties) (helpers.AllowList, error) {
+	list, err := inverted.NewSearcher(s.store, s.index.getSchema.GetSchemaSkipAuth(),
+		s.invertedRowCache, s.propertyIndices, s.index.classSearcher,
+		s.deletedDocIDs, s.index.stopwords, s.versioner.Version()).
+		DocIDs(ctx, filters, addl, s.index.Config.ClassName)
+	if err != nil {
+		return nil, errors.Wrap(err, "build inverted filter allow list")
+	}
+
+	return list, nil
 }

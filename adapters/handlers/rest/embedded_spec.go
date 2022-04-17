@@ -48,7 +48,7 @@ func init() {
       "url": "https://github.com/semi-technologies",
       "email": "hello@semi.technology"
     },
-    "version": "1.11.0"
+    "version": "1.12.2"
   },
   "basePath": "/v1",
   "paths": {
@@ -2126,6 +2126,9 @@ func init() {
           "description": "Asynchronous index clean up happens every n seconds",
           "type": "number",
           "format": "int"
+        },
+        "stopwords": {
+          "$ref": "#/definitions/StopwordConfig"
         }
       }
     },
@@ -2452,12 +2455,20 @@ func init() {
           "x-nullable": true
         },
         "moduleConfig": {
-          "description": "Configuratino specific to modules this Weaviate instance has installed",
+          "description": "Configuration specific to modules this Weaviate instance has installed",
           "type": "object"
         },
         "name": {
           "description": "Name of the property as URI relative to the schema URL.",
           "type": "string"
+        },
+        "tokenization": {
+          "description": "Determines tokenization of the property as separate words or whole field. Optional. Applies to string, string[], text and text[] data types. Allowed values are ` + "`" + `word` + "`" + ` (default) and ` + "`" + `field` + "`" + ` for string and string[], ` + "`" + `word` + "`" + ` (default) for text and text[]. Not supported for remaining data types",
+          "type": "string",
+          "enum": [
+            "word",
+            "field"
+          ]
         }
       }
     },
@@ -2603,6 +2614,30 @@ func init() {
         "schema": {
           "description": "If using a concept reference (rather than a direct reference), specify the desired properties here",
           "$ref": "#/definitions/PropertySchema"
+        }
+      }
+    },
+    "StopwordConfig": {
+      "description": "fine-grained control over stopword list usage",
+      "type": "object",
+      "properties": {
+        "additions": {
+          "description": "stopwords to be considered additionally",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "preset": {
+          "description": "pre-existing list of common words by language",
+          "type": "string"
+        },
+        "removals": {
+          "description": "stopwords to be removed from consideration",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -2804,7 +2839,7 @@ func init() {
       "url": "https://github.com/semi-technologies",
       "email": "hello@semi.technology"
     },
-    "version": "1.11.0"
+    "version": "1.12.2"
   },
   "basePath": "/v1",
   "paths": {
@@ -4985,6 +5020,9 @@ func init() {
           "description": "Asynchronous index clean up happens every n seconds",
           "type": "number",
           "format": "int"
+        },
+        "stopwords": {
+          "$ref": "#/definitions/StopwordConfig"
         }
       }
     },
@@ -5329,12 +5367,20 @@ func init() {
           "x-nullable": true
         },
         "moduleConfig": {
-          "description": "Configuratino specific to modules this Weaviate instance has installed",
+          "description": "Configuration specific to modules this Weaviate instance has installed",
           "type": "object"
         },
         "name": {
           "description": "Name of the property as URI relative to the schema URL.",
           "type": "string"
+        },
+        "tokenization": {
+          "description": "Determines tokenization of the property as separate words or whole field. Optional. Applies to string, string[], text and text[] data types. Allowed values are ` + "`" + `word` + "`" + ` (default) and ` + "`" + `field` + "`" + ` for string and string[], ` + "`" + `word` + "`" + ` (default) for text and text[]. Not supported for remaining data types",
+          "type": "string",
+          "enum": [
+            "word",
+            "field"
+          ]
         }
       }
     },
@@ -5480,6 +5526,30 @@ func init() {
         "schema": {
           "description": "If using a concept reference (rather than a direct reference), specify the desired properties here",
           "$ref": "#/definitions/PropertySchema"
+        }
+      }
+    },
+    "StopwordConfig": {
+      "description": "fine-grained control over stopword list usage",
+      "type": "object",
+      "properties": {
+        "additions": {
+          "description": "stopwords to be considered additionally",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "preset": {
+          "description": "pre-existing list of common words by language",
+          "type": "string"
+        },
+        "removals": {
+          "description": "stopwords to be removed from consideration",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

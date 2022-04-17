@@ -77,7 +77,8 @@ type hnsw struct {
 
 	nodes []*vertex
 
-	vectorForID VectorForID
+	vectorForID      VectorForID
+	multiVectorForID MultiVectorForID
 
 	cache cache
 
@@ -131,7 +132,10 @@ type BufferedLinksLogger interface {
 
 type MakeCommitLogger func() (CommitLogger, error)
 
-type VectorForID func(ctx context.Context, id uint64) ([]float32, error)
+type (
+	VectorForID      func(ctx context.Context, id uint64) ([]float32, error)
+	MultiVectorForID func(ctx context.Context, ids []uint64) ([][]float32, error)
+)
 
 // New creates a new HNSW index, the commit logger is provided through a thunk
 // (a function which can be deferred). This is because creating a commit logger
@@ -167,11 +171,11 @@ func New(cfg Config, uc UserConfig) (*hnsw, error) {
 		// inspired by c++ implementation
 		levelNormalizer:   1 / math.Log(float64(uc.MaxConnections)),
 		efConstruction:    uc.EFConstruction,
-		ef:                int64(uc.EF),
 		flatSearchCutoff:  int64(uc.FlatSearchCutoff),
 		nodes:             make([]*vertex, initialSize),
 		cache:             vectorCache,
 		vectorForID:       vectorCache.get,
+		multiVectorForID:  vectorCache.multiGet,
 		id:                cfg.ID,
 		rootPath:          cfg.RootPath,
 		tombstones:        map[uint64]struct{}{},
@@ -182,6 +186,11 @@ func New(cfg Config, uc UserConfig) (*hnsw, error) {
 		tombstoneLock:     &sync.RWMutex{},
 		initialInsertOnce: &sync.Once{},
 		cleanupInterval:   time.Duration(uc.CleanupIntervalSeconds) * time.Second,
+
+		ef:       int64(uc.EF),
+		efMin:    int64(uc.DynamicEFMin),
+		efMax:    int64(uc.DynamicEFMax),
+		efFactor: int64(uc.DynamicEFFactor),
 	}
 
 	if err := index.init(cfg); err != nil {
@@ -315,7 +324,8 @@ func (h *hnsw) findBestEntrypointForNode(currentMaxLevel, targetLevel int,
 			// if we could find a new entrypoint, use it
 			// in case everything was tombstoned, stick with the existing one
 			elem := res.Pop()
-			if !h.nodeByID(elem.ID).isUnderMaintenance() {
+			n := h.nodeByID(elem.ID)
+			if n != nil && !n.isUnderMaintenance() {
 				// but not if the entrypoint is under maintenance
 				entryPointID = elem.ID
 			}
@@ -518,7 +528,13 @@ func (h *hnsw) Drop() error {
 	// cancel vector cache goroutine
 	h.cache.drop()
 	// cancel tombstone cleanup goroutine
-	h.cancel <- struct{}{}
+
+	// if the interval is 0 we never started a cleanup cycle, therefore there is
+	// no loop running that could receive our cancel and we would be stuck. Thus,
+	// only cancel if we know it's been started.
+	if h.cleanupInterval != 0 {
+		h.cancel <- struct{}{}
+	}
 	return nil
 }
 

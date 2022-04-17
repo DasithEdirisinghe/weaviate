@@ -53,7 +53,7 @@ func (db *DB) ClassSearch(ctx context.Context,
 		return nil, fmt.Errorf("invalid params, pagination object is nil")
 	}
 
-	totalLimit, err := db.getTotalLimit(params.Pagination)
+	totalLimit, err := db.getTotalLimit(params.Pagination, params.AdditionalProperties)
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid pagination params")
 	}
@@ -75,7 +75,7 @@ func (db *DB) VectorClassSearch(ctx context.Context,
 		return db.ClassSearch(ctx, params)
 	}
 
-	totalLimit, err := db.getTotalLimit(params.Pagination)
+	totalLimit, err := db.getTotalLimit(params.Pagination, params.AdditionalProperties)
 	if err != nil {
 		return nil, errors.Wrapf(err, "invalid pagination params")
 	}
@@ -85,15 +85,33 @@ func (db *DB) VectorClassSearch(ctx context.Context,
 		return nil, fmt.Errorf("tried to browse non-existing index for %s", params.ClassName)
 	}
 
-	res, dists, err := idx.objectVectorSearch(ctx, params.SearchVector,
+	targetDist := extractDistanceFromParams(params)
+	res, dists, err := idx.objectVectorSearch(ctx, params.SearchVector, targetDist,
 		totalLimit, params.Filters, params.AdditionalProperties)
 	if err != nil {
 		return nil, errors.Wrapf(err, "object vector search at index %s", idx.ID())
 	}
 
+	if totalLimit < 0 {
+		params.Pagination.Limit = len(res)
+	}
+
 	return db.enrichRefsForList(ctx,
 		storobj.SearchResultsWithDists(db.getStoreObjects(res, params.Pagination), params.AdditionalProperties,
 			db.getDists(dists, params.Pagination)), params.Properties, params.AdditionalProperties)
+}
+
+func extractDistanceFromParams(params traverser.GetParams) float32 {
+	// we need to check these conditions first before calling
+	// traverser.ExtractCertaintyFromParams, because it will
+	// panic if these conditions are not met
+	if params.NearVector == nil && params.NearObject == nil &&
+		len(params.ModuleParams) == 0 {
+		return 0
+	}
+
+	certainty := traverser.ExtractCertaintyFromParams(params)
+	return float32(1-certainty) * 2
 }
 
 func (db *DB) VectorSearch(ctx context.Context, vector []float32, offset, limit int,
@@ -103,7 +121,6 @@ func (db *DB) VectorSearch(ctx context.Context, vector []float32, offset, limit 
 	wg := &sync.WaitGroup{}
 	mutex := &sync.Mutex{}
 	var searchErrors []error
-
 	totalLimit := offset + limit
 	emptyAdditional := additional.Properties{
 		// TODO: the fact that we need the vector for resorting shows that something
@@ -116,7 +133,8 @@ func (db *DB) VectorSearch(ctx context.Context, vector []float32, offset, limit 
 		go func(index *Index, wg *sync.WaitGroup) {
 			defer wg.Done()
 
-			res, _, err := index.objectVectorSearch(ctx, vector, totalLimit, filters, emptyAdditional)
+			res, _, err := index.objectVectorSearch(
+				ctx, vector, 0, totalLimit, filters, emptyAdditional)
 			if err != nil {
 				mutex.Lock()
 				searchErrors = append(searchErrors, errors.Wrapf(err, "search index %s", index.ID()))
@@ -194,7 +212,11 @@ func (d *DB) enrichRefsForList(ctx context.Context, objs search.Results,
 	return res, nil
 }
 
-func (db *DB) getTotalLimit(pagination *filters.Pagination) (int, error) {
+func (db *DB) getTotalLimit(pagination *filters.Pagination, addl additional.Properties) (int, error) {
+	if pagination.Limit == filters.LimitFlagSearchByDist {
+		return filters.LimitFlagSearchByDist, nil
+	}
+
 	totalLimit := pagination.Offset + db.getLimit(pagination.Limit)
 	if totalLimit > int(db.config.QueryMaximumResults) {
 		return 0, errors.New("query maximum results exceeded")
@@ -237,7 +259,7 @@ func (d *DB) getOffsetLimit(arraySize int, offset, limit int) (int, int) {
 }
 
 func (db *DB) getLimit(limit int) int {
-	if limit == -1 {
+	if limit == filters.LimitFlagNotSet {
 		return int(db.config.QueryLimit)
 	}
 	return limit

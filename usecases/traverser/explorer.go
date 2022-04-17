@@ -14,14 +14,12 @@ package traverser
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/go-openapi/strfmt"
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/entities/additional"
 	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/modulecapabilities"
-	"github.com/semi-technologies/weaviate/entities/schema/crossref"
 	"github.com/semi-technologies/weaviate/entities/search"
 	"github.com/semi-technologies/weaviate/usecases/schema"
 	"github.com/semi-technologies/weaviate/usecases/traverser/grouper"
@@ -32,11 +30,12 @@ import (
 // contain monitoring or authorization checks. It should thus never be directly
 // used by an API, but through a Traverser.
 type Explorer struct {
-	search          vectorClassSearch
-	distancer       distancer
-	logger          logrus.FieldLogger
-	modulesProvider ModulesProvider
-	schemaGetter    schema.SchemaGetter
+	search           vectorClassSearch
+	distancer        distancer
+	logger           logrus.FieldLogger
+	modulesProvider  ModulesProvider
+	schemaGetter     schema.SchemaGetter
+	nearParamsVector *nearParamsVector
 }
 
 type ModulesProvider interface {
@@ -69,7 +68,14 @@ type vectorClassSearch interface {
 func NewExplorer(search vectorClassSearch,
 	distancer distancer, logger logrus.FieldLogger,
 	modulesProvider ModulesProvider) *Explorer {
-	return &Explorer{search, distancer, logger, modulesProvider, nil} // schemaGetter is set later
+	return &Explorer{
+		search:           search,
+		distancer:        distancer,
+		logger:           logger,
+		modulesProvider:  modulesProvider,
+		schemaGetter:     nil, // schemaGetter is set later
+		nearParamsVector: newNearParamsVector(modulesProvider, search),
+	}
 }
 
 func (e *Explorer) SetSchemaGetter(sg schema.SchemaGetter) {
@@ -242,7 +248,7 @@ func (e *Explorer) searchResultsToGetResponse(ctx context.Context,
 		if searchVector != nil {
 			// Dist is between 0..2, we need to reduce to the user space of 0..1
 			normalizedDist := res.Dist / 2
-			certainty := e.extractCertaintyFromParams(params)
+			certainty := ExtractCertaintyFromParams(params)
 			if 1-(normalizedDist) < float32(certainty) {
 				continue
 			}
@@ -331,48 +337,6 @@ func (e *Explorer) exctractAdditionalPropertiesFromRef(ref interface{},
 	}
 }
 
-func (e *Explorer) extractCertaintyFromParams(params GetParams) float64 {
-	if params.NearVector != nil {
-		return params.NearVector.Certainty
-	}
-
-	if params.NearObject != nil {
-		return params.NearObject.Certainty
-	}
-
-	if len(params.ModuleParams) == 1 {
-		return e.extractCertaintyFromModuleParams(params.ModuleParams)
-	}
-
-	panic("extractCertainty was called without any known params present")
-}
-
-func (e *Explorer) extractCertaintyFromExploreParams(params ExploreParams) float64 {
-	if params.NearVector != nil {
-		return params.NearVector.Certainty
-	}
-
-	if params.NearObject != nil {
-		return params.NearObject.Certainty
-	}
-
-	if len(params.ModuleParams) == 1 {
-		return e.extractCertaintyFromModuleParams(params.ModuleParams)
-	}
-
-	panic("extractCertainty was called without any known params present")
-}
-
-func (e *Explorer) extractCertaintyFromModuleParams(moduleParams map[string]interface{}) float64 {
-	for _, param := range moduleParams {
-		if nearParam, ok := param.(modulecapabilities.NearParam); ok {
-			return nearParam.GetCertainty()
-		}
-	}
-
-	panic("extractCertaintyFromModuleParams was called without any known module near param present")
-}
-
 func (e *Explorer) Concepts(ctx context.Context,
 	params ExploreParams) ([]search.Result, error) {
 	if err := e.validateExploreParams(params); err != nil {
@@ -397,7 +361,7 @@ func (e *Explorer) Concepts(ctx context.Context,
 			return nil, errors.Errorf("res %s: %v", item.Beacon, err)
 		}
 		item.Certainty = 1 - dist
-		certainty := e.extractCertaintyFromExploreParams(params)
+		certainty := extractCertaintyFromExploreParams(params)
 		if item.Certainty >= float32(certainty) {
 			results = append(results, item)
 		}
@@ -417,38 +381,13 @@ func (e *Explorer) validateExploreParams(params ExploreParams) error {
 
 func (e *Explorer) vectorFromParams(ctx context.Context,
 	params GetParams) ([]float32, error) {
-	err := e.validateNearParams(params.NearVector, params.NearObject, params.ModuleParams, params.ClassName)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(params.ModuleParams) == 1 {
-		for name, value := range params.ModuleParams {
-			return e.vectorFromModules(ctx, params.ClassName, name, value)
-		}
-	}
-
-	if params.NearVector != nil {
-		return params.NearVector.Vector, nil
-	}
-
-	if params.NearObject != nil {
-		vector, err := e.vectorFromNearObjectParams(ctx, params.NearObject)
-		if err != nil {
-			return nil, errors.Errorf("nearObject params: %v", err)
-		}
-
-		return vector, nil
-	}
-
-	// either nearObject or nearVector or module search param has to be set,
-	// so if we land here, something has gone very wrong
-	panic("vectorFromParams was called without any known params present")
+	return e.nearParamsVector.vectorFromParams(ctx, params.NearVector,
+		params.NearObject, params.ModuleParams, params.ClassName)
 }
 
 func (e *Explorer) vectorFromExploreParams(ctx context.Context,
 	params ExploreParams) ([]float32, error) {
-	err := e.validateNearParams(params.NearVector, params.NearObject, params.ModuleParams)
+	err := e.nearParamsVector.validateNearParams(params.NearVector, params.NearObject, params.ModuleParams)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +403,7 @@ func (e *Explorer) vectorFromExploreParams(ctx context.Context,
 	}
 
 	if params.NearObject != nil {
-		vector, err := e.vectorFromNearObjectParams(ctx, params.NearObject)
+		vector, err := e.nearParamsVector.vectorFromNearObjectParams(ctx, params.NearObject)
 		if err != nil {
 			return nil, errors.Errorf("nearObject params: %v", err)
 		}
@@ -477,26 +416,12 @@ func (e *Explorer) vectorFromExploreParams(ctx context.Context,
 	panic("vectorFromParams was called without any known params present")
 }
 
-func (e *Explorer) vectorFromModules(ctx context.Context,
-	className, paramName string, paramValue interface{}) ([]float32, error) {
-	if e.modulesProvider != nil {
-		vector, err := e.modulesProvider.VectorFromSearchParam(ctx,
-			className, paramName, paramValue, e.findVector,
-		)
-		if err != nil {
-			return nil, errors.Errorf("vectorize params: %v", err)
-		}
-		return vector, nil
-	}
-	return nil, errors.New("no modules defined")
-}
-
 // similar to vectorFromModules, but not specific to a single class
 func (e *Explorer) crossClassVectorFromModules(ctx context.Context,
 	paramName string, paramValue interface{}) ([]float32, error) {
 	if e.modulesProvider != nil {
 		vector, err := e.modulesProvider.CrossClassVectorFromSearchParam(ctx,
-			paramName, paramValue, e.findVector,
+			paramName, paramValue, e.nearParamsVector.findVector,
 		)
 		if err != nil {
 			return nil, errors.Errorf("vectorize params: %v", err)
@@ -506,86 +431,46 @@ func (e *Explorer) crossClassVectorFromModules(ctx context.Context,
 	return nil, errors.New("no modules defined")
 }
 
-func (e *Explorer) validateNearParams(nearVector *NearVectorParams, nearObject *NearObjectParams,
-	moduleParams map[string]interface{}, className ...string) error {
-	if len(moduleParams) == 1 && nearVector != nil && nearObject != nil {
-		return errors.Errorf("found 'nearText' and 'nearVector' and 'nearObject' parameters " +
-			"which are conflicting, choose one instead")
+func ExtractCertaintyFromParams(params GetParams) float64 {
+	if params.NearVector != nil {
+		return params.NearVector.Certainty
 	}
 
-	if len(moduleParams) == 1 && nearVector != nil {
-		return errors.Errorf("found both 'nearText' and 'nearVector' parameters " +
-			"which are conflicting, choose one instead")
+	if params.NearObject != nil {
+		return params.NearObject.Certainty
 	}
 
-	if len(moduleParams) == 1 && nearObject != nil {
-		return errors.Errorf("found both 'nearText' and 'nearObject' parameters " +
-			"which are conflicting, choose one instead")
+	if len(params.ModuleParams) == 1 {
+		return extractCertaintyFromModuleParams(params.ModuleParams)
 	}
 
-	if nearVector != nil && nearObject != nil {
-		return errors.Errorf("found both 'nearVector' and 'nearObject' parameters " +
-			"which are conflicting, choose one instead")
-	}
-
-	if e.modulesProvider != nil {
-		if len(moduleParams) > 1 {
-			params := []string{}
-			for p := range moduleParams {
-				params = append(params, fmt.Sprintf("'%s'", p))
-			}
-			return errors.Errorf("found more then one module param: %s which are conflicting "+
-				"choose one instead", strings.Join(params, ", "))
-		}
-
-		for name, value := range moduleParams {
-			if len(className) == 1 {
-				err := e.modulesProvider.ValidateSearchParam(name, value, className[0])
-				if err != nil {
-					return err
-				}
-			} else {
-				err := e.modulesProvider.CrossClassValidateSearchParam(name, value)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	return nil
+	panic("extractCertainty was called without any known params present")
 }
 
-func (e *Explorer) vectorFromNearObjectParams(ctx context.Context,
-	params *NearObjectParams) ([]float32, error) {
-	if len(params.ID) == 0 && len(params.Beacon) == 0 {
-		return nil, errors.New("empty id and beacon")
+func extractCertaintyFromExploreParams(params ExploreParams) float64 {
+	if params.NearVector != nil {
+		return params.NearVector.Certainty
 	}
 
-	var id strfmt.UUID
-	if len(params.ID) > 0 {
-		id = strfmt.UUID(params.ID)
-	} else {
-		ref, err := crossref.Parse(params.Beacon)
-		if err != nil {
-			return nil, err
-		}
-		id = ref.TargetID
+	if params.NearObject != nil {
+		return params.NearObject.Certainty
 	}
 
-	return e.findVector(ctx, id)
+	if len(params.ModuleParams) == 1 {
+		return extractCertaintyFromModuleParams(params.ModuleParams)
+	}
+
+	panic("extractCertaintyFromExploreParams was called without any known params present")
 }
 
-func (e *Explorer) findVector(ctx context.Context, id strfmt.UUID) ([]float32, error) {
-	res, err := e.search.ObjectByID(ctx, id, search.SelectProperties{}, additional.Properties{})
-	if err != nil {
-		return nil, err
-	}
-	if res == nil {
-		return nil, errors.New("vector not found")
+func extractCertaintyFromModuleParams(moduleParams map[string]interface{}) float64 {
+	for _, param := range moduleParams {
+		if nearParam, ok := param.(modulecapabilities.NearParam); ok {
+			return nearParam.GetCertainty()
+		}
 	}
 
-	return res.Vector, nil
+	panic("extractCertaintyFromModuleParams was called without any known module near param present")
 }
 
 func beacon(res search.Result) string {

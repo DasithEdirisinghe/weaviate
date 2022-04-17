@@ -16,12 +16,19 @@ import (
 	"fmt"
 
 	"github.com/pkg/errors"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/helpers"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted/stopwords"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/lsmkv"
 	"github.com/semi-technologies/weaviate/entities/aggregation"
 	"github.com/semi-technologies/weaviate/entities/schema"
 	schemaUC "github.com/semi-technologies/weaviate/usecases/schema"
 )
+
+type vectorIndex interface {
+	SearchByVectorDistance(vector []float32, targetDistance float32, maxLimit int64,
+		allowList helpers.AllowList) ([]uint64, []float32, error)
+}
 
 type Aggregator struct {
 	store            *lsmkv.Store
@@ -30,13 +37,16 @@ type Aggregator struct {
 	invertedRowCache *inverted.RowCacher
 	classSearcher    inverted.ClassSearcher // to support ref-filters
 	deletedDocIDs    inverted.DeletedDocIDChecker
+	vectorIndex      vectorIndex
+	stopwords        stopwords.StopwordDetector
 	shardVersion     uint16
 }
 
 func New(store *lsmkv.Store, params aggregation.Params,
 	getSchema schemaUC.SchemaGetter, cache *inverted.RowCacher,
 	classSearcher inverted.ClassSearcher,
-	deletedDocIDs inverted.DeletedDocIDChecker, shardVersion uint16) *Aggregator {
+	deletedDocIDs inverted.DeletedDocIDChecker, stopwords stopwords.StopwordDetector,
+	shardVersion uint16, vectorIndex vectorIndex) *Aggregator {
 	return &Aggregator{
 		store:            store,
 		params:           params,
@@ -44,7 +54,9 @@ func New(store *lsmkv.Store, params aggregation.Params,
 		invertedRowCache: cache,
 		classSearcher:    classSearcher,
 		deletedDocIDs:    deletedDocIDs,
+		stopwords:        stopwords,
 		shardVersion:     shardVersion,
+		vectorIndex:      vectorIndex,
 	}
 }
 
@@ -53,7 +65,7 @@ func (a *Aggregator) Do(ctx context.Context) (*aggregation.Result, error) {
 		return newGroupedAggregator(a).Do(ctx)
 	}
 
-	if a.params.Filters != nil {
+	if a.params.Filters != nil || len(a.params.SearchVector) > 0 {
 		return newFilteredAggregator(a).Do(ctx)
 	}
 
