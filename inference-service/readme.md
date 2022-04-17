@@ -1,0 +1,1 @@
+## Inference service for text-summarization module
