@@ -37,7 +37,7 @@ type SUMModule struct {
 }
 
 type sumClient interface {
-	GetTokens(ctx context.Context, property, text string) ([]ent.TokenResult, error)
+	GetSummary(ctx context.Context, property, text string) ([]ent.SummaryResult, error)
 	MetaInfo() (map[string]interface{}, error)
 }
 

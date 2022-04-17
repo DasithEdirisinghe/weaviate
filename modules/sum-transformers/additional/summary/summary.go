@@ -18,11 +18,11 @@ import (
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/graphql/language/ast"
 	"github.com/semi-technologies/weaviate/entities/search"
-	"github.com/semi-technologies/weaviate/modules/ner-transformers/ent"
+	"github.com/semi-technologies/weaviate/modules/sum-transformers/ent"
 )
 
 type sumClient interface {
-	GetTokens(ctx context.Context, property, text string) ([]ent.SummaryResult, error)
+	GetSummary(ctx context.Context, property, text string) ([]ent.SummaryResult, error)
 }
 
 type SummaryProvider struct {
@@ -49,7 +49,7 @@ func (p *SummaryProvider) AdditionalPropertyFn(ctx context.Context,
 	in []search.Result, params interface{}, limit *int,
 	argumentModuleParams map[string]interface{}) ([]search.Result, error) {
 	if parameters, ok := params.(*Params); ok {
-		return p.findSumamry(ctx, in, parameters)
+		return p.findSummary(ctx, in, parameters)
 	}
 	return nil, errors.New("wrong parameters")
 }

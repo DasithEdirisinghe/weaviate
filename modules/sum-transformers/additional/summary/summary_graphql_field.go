@@ -17,7 +17,7 @@ import (
 	"github.com/graphql-go/graphql"
 )
 
-func (p *SummaryProvider) additionalSumamryField(classname string) *graphql.Field {
+func (p *SummaryProvider) additionalSummaryField(classname string) *graphql.Field {
 	return &graphql.Field{
 		Args: graphql.FieldConfigArgument{
 			"properties": &graphql.ArgumentConfig{
