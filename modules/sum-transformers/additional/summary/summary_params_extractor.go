@@ -35,7 +35,3 @@ func (p *SummaryProvider) parseSummaryArguments(args []*ast.Argument) *Params {
 
 	return out
 }
-
-func ptInt(in int) *int {
-	return &in
-}
