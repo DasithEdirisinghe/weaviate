@@ -61,15 +61,15 @@ func (p *SummaryProvider) findSummary(ctx context.Context,
 
 			// for each text property result, call the NER function and add to additional result
 			for property, value := range textProperties {
-				tokens, err := p.sum.GetSummary(ctx, property, value)
+				summary, err := p.sum.GetSummary(ctx, property, value)
 				if err != nil {
 					return in, err
 				}
 
-				summaryList = append(summaryList, tokens...)
+				summaryList = append(summaryList, summary...)
 			}
 
-			ap["tokens"] = summaryList
+			ap["summary"] = summaryList
 
 			in[i].AdditionalProperties = ap
 		}
