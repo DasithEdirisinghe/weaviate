@@ -28,7 +28,7 @@ def startup_event():
     else:
         logger.info("Running on CPU")
 
-    ner = Sum('./models/model', cuda_support, cuda_core)
+    sum = Sum('./models/model', cuda_support, cuda_core)
     meta_config = Meta('./models/model')
 
 

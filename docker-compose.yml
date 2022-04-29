@@ -51,6 +51,6 @@ services:
     ports:
       - "8005:8080"
   sum-transformers:
-    image: semitechnologies/ner-transformers:latest
+    image: sum-transformers:latest
     ports:
       - "8006:8080"

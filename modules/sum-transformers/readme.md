@@ -72,3 +72,13 @@ schema = {
 }
 
 ```
+### Test results
+
+#### Client package
+
+![client_test](https://user-images.githubusercontent.com/58045206/165968874-70a4cbb4-cc04-44de-b661-965037bbfce3.png)
+
+
+#### summary package
+![summary_test](https://user-images.githubusercontent.com/58045206/165968881-9b82a62d-f267-404a-90e9-6f45296e9d4f.png)
+

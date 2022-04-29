@@ -23,7 +23,7 @@ class Sum:
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
 
-        self.nlp = pipeline("sum", model=self.model, tokenizer=self.tokenizer, device=device)
+        self.nlp = pipeline("summarization", model=self.model, tokenizer=self.tokenizer, device=device)
 
 
     async def do(self, input: SumInput):
