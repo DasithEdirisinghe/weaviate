@@ -47,6 +47,5 @@ class Sum:
         
         for item in sum_results:
             item['result'] = item.pop('summary_text')
-            del item['index']
 
         return sum_results
