@@ -11,9 +11,9 @@
 
 package models
 
-// Answer used in qna module to represent
-// the answer to a given question
+// Summary used in sum module to represent
+// the summary to a given content
 type Summary struct {
-	Result   *string `json:"result,omitempty"`
-	Property *string `json:"property,omitempty"`
+	Property string `json:"property,omitempty"`
+	Result   string `json:"result,omitempty"`
 }
