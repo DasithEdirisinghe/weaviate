@@ -25,3 +25,8 @@ free-standing structure in France after the Millau Viaduct
 ]
 ```
 
+#### Smoke Test Result
+
+![smoke_test](https://user-images.githubusercontent.com/58045206/166231030-0c639b94-e035-4a2a-9644-eb4297ffa8f9.png)
+
+
