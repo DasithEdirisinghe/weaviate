@@ -23,12 +23,9 @@ import (
 
 func (p *SummaryProvider) findSummary(ctx context.Context,
 	in []search.Result, params *Params) ([]search.Result, error) {
-	if len(in) > 0 {
-
-		if len(in) == 0 {
-			return nil, nil
-		}
-
+	if len(in) == 0 {
+		return nil, nil
+	} else if len(in) > 0 {
 		if params == nil {
 			return nil, fmt.Errorf("no params provided")
 		}
@@ -59,7 +56,7 @@ func (p *SummaryProvider) findSummary(ctx context.Context,
 
 			summaryList := []ent.SummaryResult{}
 
-			// for each text property result, call the NER function and add to additional result
+			// for each text property result, call the SUM function and add to additional result
 			for property, value := range textProperties {
 				summary, err := p.sum.GetSummary(ctx, property, value)
 				if err != nil {
