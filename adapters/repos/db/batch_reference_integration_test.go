@@ -54,9 +54,12 @@ func Test_AddingReferencesInBatches(t *testing.T) {
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
 	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+		&fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
+
+	defer repo.Shutdown(context.Background())
+
 	require.Nil(t, err)
 	migrator := NewMigrator(repo, logger)
 

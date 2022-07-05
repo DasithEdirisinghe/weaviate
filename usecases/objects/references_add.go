@@ -13,6 +13,7 @@ package objects
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-openapi/strfmt"
@@ -22,99 +23,85 @@ import (
 	"github.com/semi-technologies/weaviate/usecases/objects/validation"
 )
 
-// AddObjectReference Class Instance to the connected DB. If the class contains a network
+// AddObjectReference to an existing object. If the class contains a network
 // ref, it has a side-effect on the schema: The schema will be updated to
 // include this particular network ref class.
-func (m *Manager) AddObjectReference(ctx context.Context, principal *models.Principal,
-	id strfmt.UUID, propertyName string, property *models.SingleRef) error {
-	err := m.authorizer.Authorize(principal, "update", fmt.Sprintf("objects/%s", id.String()))
-	if err != nil {
-		return err
+func (m *Manager) AddObjectReference(
+	ctx context.Context,
+	principal *models.Principal,
+	input *AddReferenceInput,
+) *Error {
+	deprecatedEndpoint := input.Class == ""
+	if deprecatedEndpoint { // for backward compatibility only
+		objectRes, err := m.getObjectFromRepo(ctx, "", input.ID, additional.Properties{})
+		if err != nil {
+			errnf := ErrNotFound{} // treated as StatusBadRequest for backward comp
+			if errors.As(err, &errnf) {
+				return &Error{"source object deprecated", StatusBadRequest, err}
+			}
+			return &Error{"source object deprecated", StatusInternalServerError, err}
+		}
+		input.Class = objectRes.Object().Class
+	}
+	path := fmt.Sprintf("objects/%s/%s", input.Class, input.ID)
+	if err := m.authorizer.Authorize(principal, "update", path); err != nil {
+		return &Error{path, StatusForbidden, err}
 	}
 
 	unlock, err := m.locks.LockSchema()
 	if err != nil {
-		return NewErrInternal("could not acquire lock: %v", err)
+		return &Error{"cannot lock", StatusInternalServerError, err}
 	}
 	defer unlock()
 
-	return m.addObjectReferenceToConnectorAndSchema(ctx, principal, id, propertyName, property)
-}
-
-func (m *Manager) addObjectReferenceToConnectorAndSchema(ctx context.Context, principal *models.Principal,
-	id strfmt.UUID, propertyName string, property *models.SingleRef) error {
-	// get object to see if it exists
-	objectRes, err := m.getObjectFromRepo(ctx, id, additional.Properties{})
-	if err != nil {
-		return err
+	validator := validation.New(schema.Schema{}, m.exists, m.config)
+	if err := input.validate(ctx, principal, validator, m.schemaManager); err != nil {
+		return &Error{"validate inputs", StatusBadRequest, err}
+	}
+	if !deprecatedEndpoint {
+		ok, err := m.vectorRepo.Exists(ctx, input.Class, input.ID)
+		if err != nil {
+			return &Error{"source object", StatusInternalServerError, err}
+		}
+		if !ok {
+			return &Error{"source object", StatusNotFound, err}
+		}
 	}
 
-	object := objectRes.Object()
-
-	err = m.validateReference(ctx, property)
-	if err != nil {
-		return err
+	if err := m.vectorRepo.AddReference(ctx, input.Class, input.ID, input.Property, &input.Ref); err != nil {
+		return &Error{"add reference to repo", StatusInternalServerError, err}
 	}
-
-	err = m.validateCanModifyReference(principal, object.Class, propertyName)
-	if err != nil {
-		return err
-	}
-
-	err = m.vectorRepo.AddReference(ctx, object.Class, object.ID,
-		propertyName, property)
-	if err != nil {
-		return NewErrInternal("add reference to vector repo: %v", err)
-	}
-
 	return nil
 }
 
-func (m *Manager) validateReference(ctx context.Context, reference *models.SingleRef) error {
-	err := validation.New(schema.Schema{}, m.exists, m.config).
-		ValidateSingleRef(ctx, reference, "reference not found")
-	if err != nil {
-		return NewErrInvalidUserInput("invalid reference: %v", err)
-	}
-
-	return nil
+// AddReferenceInput represents required inputs to add a reference to an existing object.
+type AddReferenceInput struct {
+	// Class name
+	Class string
+	// ID of an object
+	ID strfmt.UUID
+	// Property name
+	Property string
+	// Ref cross reference
+	Ref models.SingleRef
 }
 
-func (m *Manager) validateCanModifyReference(principal *models.Principal,
-	className string, propertyName string) error {
-	class, err := schema.ValidateClassName(className)
-	if err != nil {
-		return NewErrInvalidUserInput("invalid class name in reference: %v", err)
+func (req *AddReferenceInput) validate(
+	ctx context.Context,
+	principal *models.Principal,
+	v *validation.Validator,
+	sm schemaManager,
+) error {
+	if err := validateReferenceName(req.Class, req.Property); err != nil {
+		return err
 	}
-
-	err = schema.ValidateReservedPropertyName(propertyName)
-	if err != nil {
-		return NewErrInvalidUserInput("invalid property name in reference: %v", err)
-	}
-
-	propName, err := schema.ValidatePropertyName(propertyName)
-	if err != nil {
-		return NewErrInvalidUserInput("invalid property name in reference: %v", err)
-	}
-
-	schema, err := m.schemaManager.GetSchema(principal)
-	if err != nil {
+	if err := v.ValidateSingleRef(ctx, &req.Ref, "validate reference"); err != nil {
 		return err
 	}
 
-	prop, err := schema.GetProperty(class, propName)
+	schema, err := sm.GetSchema(principal)
 	if err != nil {
-		return NewErrInvalidUserInput("Could not find property '%s': %v", propertyName, err)
+		return err
 	}
-
-	propertyDataType, err := schema.FindPropertyDataType(prop.DataType)
-	if err != nil {
-		return NewErrInternal("Could not find datatype of property '%s': %v", propertyName, err)
-	}
-
-	if propertyDataType.IsPrimitive() {
-		return NewErrInvalidUserInput("property '%s' is a primitive datatype, not a reference-type", propertyName)
-	}
-
-	return nil
+	return validateReferenceSchema(req.Class, req.Property, schema)
 }

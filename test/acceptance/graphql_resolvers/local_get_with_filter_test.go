@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-openapi/strfmt"
+	"github.com/semi-technologies/weaviate/entities/models"
 	"github.com/semi-technologies/weaviate/test/acceptance/helper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -345,7 +347,7 @@ func gettingObjectsWithFilters(t *testing.T) {
 		})
 	})
 
-	t.Run("with filtering with id", func(t *testing.T) {
+	t.Run("with filtering by id", func(t *testing.T) {
 		// this is the journey test for gh-1088
 
 		query := `
@@ -377,5 +379,115 @@ func gettingObjectsWithFilters(t *testing.T) {
 		}
 
 		assert.Equal(t, expected, airport)
+	})
+
+	t.Run("with filtering by timestamps", func(t *testing.T) {
+		query := `
+			{
+				Get {
+					Airport {
+						_additional {
+							id
+							creationTimeUnix
+							lastUpdateTimeUnix
+						}
+					}
+				}
+			}
+		`
+		result := AssertGraphQL(t, helper.RootAuth, query)
+		airport := result.Get("Get", "Airport").AsSlice()[0]
+		additional := airport.(map[string]interface{})["_additional"]
+		targetID := additional.(map[string]interface{})["id"].(string)
+		targetCreationTime := additional.(map[string]interface{})["creationTimeUnix"].(string)
+		targetUpdateTime := additional.(map[string]interface{})["lastUpdateTimeUnix"].(string)
+
+		t.Run("creationTimeUnix", func(t *testing.T) {
+			query := fmt.Sprintf(`
+				{
+					Get {
+						Airport(
+							where: {
+								path: ["_creationTimeUnix"]
+								operator: Equal
+								valueString: "%s"
+							}
+						)
+						{
+							_additional {
+								id
+							}
+						}
+					}
+				}
+			`, targetCreationTime)
+
+			result := AssertGraphQL(t, helper.RootAuth, query)
+			airport := result.Get("Get", "Airport").AsSlice()[0]
+			additional := airport.(map[string]interface{})["_additional"]
+			resultID := additional.(map[string]interface{})["id"].(string)
+			assert.Equal(t, targetID, resultID)
+		})
+
+		t.Run("lastUpdateTimeUnix", func(t *testing.T) {
+			query := fmt.Sprintf(`
+				{
+					Get {
+						Airport(
+							where: {
+								path: ["_lastUpdateTimeUnix"]
+								operator: Equal
+								valueString: "%s"
+							}
+						)
+						{
+							_additional {
+								id
+							}
+						}
+					}
+				}
+			`, targetUpdateTime)
+
+			result := AssertGraphQL(t, helper.RootAuth, query)
+			airport := result.Get("Get", "Airport").AsSlice()[0]
+			additional := airport.(map[string]interface{})["_additional"]
+			resultID := additional.(map[string]interface{})["id"].(string)
+			assert.Equal(t, targetID, resultID)
+		})
+	})
+
+	t.Run("with id filter on object with no props", func(t *testing.T) {
+		id := strfmt.UUID("f0ea8fb8-5a1f-449d-aed5-d68dc65cd644")
+		defer deleteObjectClass(t, "NoProps")
+
+		t.Run("setup test class and obj", func(t *testing.T) {
+			createObjectClass(t, &models.Class{
+				Class: "NoProps", Properties: []*models.Property{
+					{Name: "unused", DataType: []string{"string"}},
+				},
+			})
+
+			createObject(t, &models.Object{Class: "NoProps", ID: id})
+		})
+
+		t.Run("do query", func(t *testing.T) {
+			query := fmt.Sprintf(`
+				{
+					Get {
+						NoProps(where:{operator:Equal path:["_id"] valueString:"%s"})
+						{
+							_additional {id}
+						}
+					}
+				}
+			`, id)
+			response := AssertGraphQL(t, helper.RootAuth, query)
+			result := response.Get("Get", "NoProps").AsSlice()
+			require.Len(t, result, 1)
+			additional := result[0].(map[string]interface{})["_additional"]
+			resultID := additional.(map[string]interface{})["id"].(string)
+			assert.Equal(t, id.String(), resultID)
+		})
 	})
 }

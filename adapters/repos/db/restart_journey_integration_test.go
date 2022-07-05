@@ -63,8 +63,7 @@ func TestRestartJourney(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
@@ -129,7 +128,7 @@ func TestRestartJourney(t *testing.T) {
 							Property: "id",
 						},
 					},
-				}, additional.Properties{})
+				}, nil, additional.Properties{})
 			require.Nil(t, err)
 			require.Len(t, res, 1)
 			assert.Equal(t, "the band is just fantastic that is really what I think",
@@ -150,7 +149,7 @@ func TestRestartJourney(t *testing.T) {
 							Property: "description",
 						},
 					},
-				}, additional.Properties{})
+				}, nil, additional.Properties{})
 			require.Nil(t, err)
 			require.Len(t, res, 1)
 			assert.Equal(t, "oh by the way, which one's pink?",
@@ -183,8 +182,7 @@ func TestRestartJourney(t *testing.T) {
 			QueryMaximumResults:       10000,
 			DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 			DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-		}, &fakeRemoteClient{},
-			&fakeNodeResolver{})
+		}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 		newRepo.SetSchemaGetter(schemaGetter)
 		err := newRepo.WaitForStartup(testCtx())
 		require.Nil(t, err)
@@ -214,7 +212,7 @@ func TestRestartJourney(t *testing.T) {
 							Property: "id",
 						},
 					},
-				}, additional.Properties{})
+				}, nil, additional.Properties{})
 			require.Nil(t, err)
 			require.Len(t, res, 1)
 			assert.Equal(t, "the band is just fantastic that is really what I think",
@@ -235,7 +233,7 @@ func TestRestartJourney(t *testing.T) {
 							Property: "description",
 						},
 					},
-				}, additional.Properties{})
+				}, nil, additional.Properties{})
 			require.Nil(t, err)
 			require.Len(t, res, 1)
 			assert.Equal(t, "oh by the way, which one's pink?",
@@ -256,5 +254,9 @@ func TestRestartJourney(t *testing.T) {
 			assert.Equal(t, "the band is just fantastic that is really what I think",
 				res[0].Schema.(map[string]interface{})["description"])
 		})
+	})
+
+	t.Run("shutdown", func(t *testing.T) {
+		require.Nil(t, newRepo.Shutdown(context.Background()))
 	})
 }

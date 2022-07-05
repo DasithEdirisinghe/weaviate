@@ -47,11 +47,11 @@ func TestMultipleCrossRefTypes(t *testing.T) {
 		RootPath:                  dirName,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
+	defer repo.Shutdown(context.Background())
 	migrator := NewMigrator(repo, logger)
 
 	t.Run("adding all classes to the schema", func(t *testing.T) {

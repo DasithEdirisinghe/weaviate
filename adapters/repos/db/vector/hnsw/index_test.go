@@ -77,6 +77,49 @@ func TestHnswIndexGrow(t *testing.T) {
 		err := index.Add(uint64(initialSize+1), vector)
 		require.Nil(t, err)
 	})
+
+	t.Run("should grow index without panic", func(t *testing.T) {
+		// This test shows that we had an edge case that was not covered
+		// in growIndexToAccomodateNode method which was leading to panic:
+		// panic: runtime error: index out of range [170001] with length 170001
+		vector := []float32{0.11, 0.22}
+		id := uint64(5*initialSize + 1)
+		err := index.Add(id, vector)
+		require.Nil(t, err)
+		// index should grow to 150001
+		assert.Equal(t, int(id)+minimumIndexGrowthDelta, len(index.nodes))
+		assert.Equal(t, int32(id+2*minimumIndexGrowthDelta), index.cache.len())
+		// try to add a vector with id: 170001
+		id = uint64(6*initialSize + minimumIndexGrowthDelta + 1)
+		err = index.Add(id, vector)
+		require.Nil(t, err)
+		// index should grow to at least 170001
+		assert.GreaterOrEqual(t, len(index.nodes), 17001)
+		assert.GreaterOrEqual(t, index.cache.len(), int32(17001))
+	})
+
+	t.Run("should grow index", func(t *testing.T) {
+		// should not increase the nodes size
+		sizeBefore := len(index.nodes)
+		cacheBefore := index.cache.len()
+		idDontGrowIndex := uint64(6*initialSize - 1)
+		err := index.Add(idDontGrowIndex, vector)
+		require.Nil(t, err)
+		assert.Equal(t, sizeBefore, len(index.nodes))
+		assert.Equal(t, cacheBefore, index.cache.len())
+		// should increase nodes
+		id := uint64(8*initialSize + 1)
+		err = index.Add(id, vector)
+		require.Nil(t, err)
+		assert.GreaterOrEqual(t, len(index.nodes), int(id))
+		assert.GreaterOrEqual(t, index.cache.len(), int32(id))
+		// should increase nodes when a much greater id is passed
+		id = uint64(20*initialSize + 22)
+		err = index.Add(id, vector)
+		require.Nil(t, err)
+		assert.Equal(t, int(id)+minimumIndexGrowthDelta, len(index.nodes))
+		assert.Equal(t, int32(id+2*minimumIndexGrowthDelta), index.cache.len())
+	})
 }
 
 func createEmptyHnswIndexForTests(t *testing.T, vecForIDFn VectorForID) *hnsw {

@@ -22,10 +22,6 @@ func (g *GraphQLArgumentsProvider) getNearTextArgumentFn(classname string) *grap
 	return g.nearTextArgument("GetObjects", classname)
 }
 
-func (g *GraphQLArgumentsProvider) exploreNearTextArgumentFn() *graphql.ArgumentConfig {
-	return g.nearTextArgument("Explore", "")
-}
-
 func (g *GraphQLArgumentsProvider) nearTextArgument(prefix, className string) *graphql.ArgumentConfig {
 	prefixName := fmt.Sprintf("Txt2VecOpenAI%s%s", prefix, className)
 	return &graphql.ArgumentConfig{
@@ -55,6 +51,10 @@ func (g *GraphQLArgumentsProvider) nearTextFields(prefix string) graphql.InputOb
 		},
 		"certainty": &graphql.InputObjectFieldConfig{
 			Description: descriptions.Certainty,
+			Type:        graphql.Float,
+		},
+		"distance": &graphql.InputObjectFieldConfig{
+			Description: descriptions.Distance,
 			Type:        graphql.Float,
 		},
 		"moveAwayFrom": &graphql.InputObjectFieldConfig{

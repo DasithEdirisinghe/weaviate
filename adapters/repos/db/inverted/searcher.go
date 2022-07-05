@@ -15,7 +15,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/helpers"
@@ -23,6 +25,7 @@ import (
 	"github.com/semi-technologies/weaviate/adapters/repos/db/lsmkv"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/notimplemented"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/propertyspecific"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/sorter"
 	"github.com/semi-technologies/weaviate/entities/additional"
 	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/models"
@@ -68,14 +71,13 @@ func NewSearcher(store *lsmkv.Store, schema schema.Schema,
 
 // Object returns a list of full objects
 func (f *Searcher) Object(ctx context.Context, limit int,
-	filter *filters.LocalFilter, additional additional.Properties,
+	filter *filters.LocalFilter, sort []filters.Sort, additional additional.Properties,
 	className schema.ClassName) ([]*storobj.Object, error) {
 	pv, err := f.extractPropValuePair(filter.Root, className)
 	if err != nil {
 		return nil, err
 	}
 
-	var out []*storobj.Object
 	// we assume that when retrieving objects, we can not tolerate duplicates as
 	// they would have a direct impact on the user
 	if err := pv.fetchDocIDs(f, limit, false); err != nil {
@@ -87,18 +89,41 @@ func (f *Searcher) Object(ctx context.Context, limit int,
 		return nil, errors.Wrap(err, "merge doc ids by operator")
 	}
 
-	// cutoff if required, e.g. after merging unlimted filters
-	if len(pointers.docIDs) > limit {
-		pointers.docIDs = pointers.docIDs[:limit]
+	if len(sort) > 0 {
+		return f.sortedObjectsByDocID(ctx, limit, sort, pointers.docIDs, additional, className)
 	}
 
-	res, err := f.objectsByDocID(pointers.IDs(), additional)
+	return f.allObjectsByDocID(pointers.IDs(), limit, additional)
+}
+
+func (f *Searcher) allObjectsByDocID(ids []uint64, limit int,
+	additional additional.Properties) ([]*storobj.Object, error) {
+	// cutoff if required, e.g. after merging unlimted filters
+	docIDs := ids
+	if len(docIDs) > limit {
+		docIDs = docIDs[:limit]
+	}
+
+	res, err := f.objectsByDocID(docIDs, additional)
 	if err != nil {
 		return nil, errors.Wrap(err, "resolve doc ids to objects")
 	}
+	return res, nil
+}
 
-	out = res
-	return out, nil
+func (f *Searcher) sortedObjectsByDocID(ctx context.Context, limit int, sort []filters.Sort, ids []uint64,
+	additional additional.Properties, className schema.ClassName) ([]*storobj.Object, error) {
+	docIDs, err := f.sort(ctx, limit, sort, ids, additional, className)
+	if err != nil {
+		return nil, errors.Wrap(err, "sort doc ids")
+	}
+	return f.objectsByDocID(docIDs, additional)
+}
+
+func (f *Searcher) sort(ctx context.Context, limit int, sort []filters.Sort, docIDs []uint64,
+	additional additional.Properties, className schema.ClassName) ([]uint64, error) {
+	return sorter.NewLSMSorter(f.store, f.schema, className).
+		SortDocIDs(ctx, limit, sort, docIDs, additional)
 }
 
 func (f *Searcher) objectsByDocID(ids []uint64,
@@ -149,14 +174,29 @@ func (f *Searcher) objectsByDocID(ids []uint64,
 // had the shortest distance
 func (f *Searcher) DocIDs(ctx context.Context, filter *filters.LocalFilter,
 	additional additional.Properties, className schema.ClassName) (helpers.AllowList, error) {
+	return f.docIDs(ctx, filter, additional, className, true)
+}
+
+// DocIDsPreventCaching is the same as DocIDs, but makes sure that no filter
+// cache entries are written. This can be used when we can guarantee that the
+// filter is part of an operation that will lead to a state change, such as
+// batch delete. The state change would make the cached filter unusable
+// anyway, so we don't need to unnecessarily populate the cache with an entry.
+func (f *Searcher) DocIDsPreventCaching(ctx context.Context, filter *filters.LocalFilter,
+	additional additional.Properties, className schema.ClassName) (helpers.AllowList, error) {
+	return f.docIDs(ctx, filter, additional, className, false)
+}
+
+func (f *Searcher) docIDs(ctx context.Context, filter *filters.LocalFilter,
+	additional additional.Properties, className schema.ClassName,
+	allowCaching bool) (helpers.AllowList, error) {
 	pv, err := f.extractPropValuePair(filter.Root, className)
 	if err != nil {
 		return nil, err
 	}
 
 	cacheable := pv.cacheable()
-	if !cacheable {
-	} else {
+	if cacheable && allowCaching {
 		if err := pv.fetchHashes(f); err != nil {
 			return nil, errors.Wrap(err, "fetch row hashes to check for cach eligibility")
 		}
@@ -183,7 +223,7 @@ func (f *Searcher) DocIDs(ctx context.Context, filter *filters.LocalFilter,
 		out.Insert(p)
 	}
 
-	if cacheable {
+	if cacheable && allowCaching {
 		f.rowCache.Store(pv.docIDs.checksum, &CacheEntry{
 			Type:      CacheTypeAllowList,
 			AllowList: out,
@@ -220,8 +260,8 @@ func (fs *Searcher) extractPropValuePair(filter *filters.Clause,
 	}
 	// we are on a value element
 
-	if fs.onIDProp(props[0]) {
-		return fs.extractIDProp(filter.Value.Value, filter.Operator)
+	if fs.onInternalProp(props[0]) {
+		return fs.extractInternalProp(props[0], filter.Value.Type, filter.Value.Value, filter.Operator)
 	}
 
 	if fs.onRefProp(className, props[0]) && filter.Value.Type == schema.DataTypeInt {
@@ -325,6 +365,19 @@ func (fs *Searcher) extractGeoFilter(propName string, value interface{},
 	}, nil
 }
 
+func (fs *Searcher) extractInternalProp(propName string, propType schema.DataType, value interface{},
+	operator filters.Operator) (*propValuePair, error) {
+	switch propName {
+	case filters.InternalPropBackwardsCompatID, filters.InternalPropID:
+		return fs.extractIDProp(value, operator)
+	case filters.InternalPropCreationTimeUnix, filters.InternalPropLastUpdateTimeUnix:
+		return extractTimestampProp(propName, propType, value, operator)
+	default:
+		return nil, fmt.Errorf(
+			"failed to extract internal prop, unsupported internal prop '%s'", propName)
+	}
+}
+
 func (fs *Searcher) extractIDProp(value interface{},
 	operator filters.Operator) (*propValuePair, error) {
 	v, ok := value.(string)
@@ -335,7 +388,45 @@ func (fs *Searcher) extractIDProp(value interface{},
 	return &propValuePair{
 		value:        []byte(v),
 		hasFrequency: false,
-		prop:         helpers.PropertyNameID,
+		prop:         filters.InternalPropID,
+		operator:     operator,
+	}, nil
+}
+
+func extractTimestampProp(propName string, propType schema.DataType, value interface{},
+	operator filters.Operator) (*propValuePair, error) {
+	if propType != schema.DataTypeDate && propType != schema.DataTypeString {
+		return nil, fmt.Errorf(
+			"failed to extract internal prop, unsupported type %T for prop %s", value, propName)
+	}
+
+	var valResult []byte
+	// if propType is a `valueDate`, we need to convert
+	// it to ms before fetching. this is the format by
+	// which our timestamps are indexed
+	if propType == schema.DataTypeDate {
+		v, ok := value.(time.Time)
+		if !ok {
+			return nil, fmt.Errorf("expected value to be time.Time, got %T", value)
+		}
+
+		b, err := json.Marshal(v.UnixNano() / int64(time.Millisecond))
+		if err != nil {
+			return nil, fmt.Errorf("failed to extract internal prop: %s", err)
+		}
+		valResult = b
+	} else {
+		v, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("expected value to be string, got %T", value)
+		}
+		valResult = []byte(v)
+	}
+
+	return &propValuePair{
+		value:        valResult,
+		hasFrequency: false,
+		prop:         propName,
 		operator:     operator,
 	}, nil
 }
@@ -419,8 +510,8 @@ func (fs *Searcher) onGeoProp(className schema.ClassName, propName string) bool 
 	return schema.DataType(property.DataType[0]) == schema.DataTypeGeoCoordinates
 }
 
-func (fs *Searcher) onIDProp(propName string) bool {
-	return propName == helpers.PropertyNameID || propName == "id"
+func (fs *Searcher) onInternalProp(propName string) bool {
+	return filters.IsInternalProperty(schema.PropertyName(propName))
 }
 
 func (fs *Searcher) onTokenizablePropValue(valueType schema.DataType) bool {

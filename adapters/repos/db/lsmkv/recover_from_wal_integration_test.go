@@ -16,6 +16,7 @@ package lsmkv
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"math/rand"
@@ -42,12 +43,45 @@ func TestReplaceStrategy_RecoverFromWAL(t *testing.T) {
 		fmt.Println(err)
 	}()
 
-	t.Run("without previous state", func(t *testing.T) {
-		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), WithStrategy(StrategyReplace))
+	t.Run("with some previous state", func(t *testing.T) {
+		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), nil,
+			WithStrategy(StrategyReplace))
 		require.Nil(t, err)
 
 		// so big it effectively never triggers as part of this test
 		b.SetMemtableThreshold(1e9)
+
+		t.Run("set one key that will be flushed orderly", func(t *testing.T) {
+			// the motivation behind flushing this initial segment is to check that
+			// deletion as part of the recovery also works correctly. If we would
+			// just delete something that was created as part of the same memtable,
+			// the tests would still pass, even with removing the logic that recovers
+			// tombstones.
+			//
+			// To make sure they fail in this case, this prior state was introduced.
+			// An entry with key "key-2" is introduced in a previous segment, so if
+			// the deletion fails as part of the recovery this key would still be
+			// present later on. With the deletion working correctly it will be gone.
+			//
+			// You can test this by commenting the "p.memtable.setTombstone()" line
+			// in p.doReplace(). This will fail the tests suite, but prior to this
+			// addition it would have passed.
+			key2 := []byte("key-2")
+			orig2 := []byte("delete me later - you should never find me again")
+
+			err = b.Put(key2, orig2)
+			require.Nil(t, err)
+		})
+
+		t.Run("shutdown (orderly) bucket to create first segment", func(t *testing.T) {
+			b.Shutdown(context.Background())
+
+			// then recreate bucket
+			var err error
+			b, err = NewBucket(testCtx(), dirNameOriginal, nullLogger(), nil,
+				WithStrategy(StrategyReplace))
+			require.Nil(t, err)
+		})
 
 		t.Run("set original values", func(t *testing.T) {
 			key1 := []byte("key-1")
@@ -99,15 +133,29 @@ func TestReplaceStrategy_RecoverFromWAL(t *testing.T) {
 		})
 
 		t.Run("copy state into recovery folder and destroy original", func(t *testing.T) {
-			cmd := exec.Command("/bin/bash", "-c", fmt.Sprintf("cp -r %s/*.wal %s",
-				dirNameOriginal, dirNameRecovered))
-			var out bytes.Buffer
-			cmd.Stderr = &out
-			err := cmd.Run()
-			if err != nil {
-				fmt.Println(out.String())
-				t.Fatal(err)
-			}
+			t.Run("copy over wals", func(t *testing.T) {
+				cmd := exec.Command("/bin/bash", "-c", fmt.Sprintf("cp -r %s/*.wal %s",
+					dirNameOriginal, dirNameRecovered))
+				var out bytes.Buffer
+				cmd.Stderr = &out
+				err := cmd.Run()
+				if err != nil {
+					fmt.Println(out.String())
+					t.Fatal(err)
+				}
+			})
+
+			t.Run("copy over segments", func(t *testing.T) {
+				cmd := exec.Command("/bin/bash", "-c", fmt.Sprintf("cp -r %s/*.db %s",
+					dirNameOriginal, dirNameRecovered))
+				var out bytes.Buffer
+				cmd.Stderr = &out
+				err := cmd.Run()
+				if err != nil {
+					fmt.Println(out.String())
+					t.Fatal(err)
+				}
+			})
 			b = nil
 			require.Nil(t, os.RemoveAll(dirNameOriginal))
 		})
@@ -115,7 +163,8 @@ func TestReplaceStrategy_RecoverFromWAL(t *testing.T) {
 		var bRec *Bucket
 
 		t.Run("create new bucket from existing state", func(t *testing.T) {
-			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), WithStrategy(StrategyReplace))
+			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), nil,
+				WithStrategy(StrategyReplace))
 			require.Nil(t, err)
 
 			// so big it effectively never triggers as part of this test
@@ -157,7 +206,8 @@ func TestReplaceStrategy_RecoverFromWALWithCorruptLastElement(t *testing.T) {
 	}()
 
 	t.Run("without previous state", func(t *testing.T) {
-		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), WithStrategy(StrategyReplace))
+		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), nil,
+			WithStrategy(StrategyReplace))
 		require.Nil(t, err)
 
 		// so big it effectively never triggers as part of this test
@@ -263,7 +313,8 @@ func TestReplaceStrategy_RecoverFromWALWithCorruptLastElement(t *testing.T) {
 		var bRec *Bucket
 
 		t.Run("create new bucket from existing state", func(t *testing.T) {
-			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), WithStrategy(StrategyReplace))
+			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), nil,
+				WithStrategy(StrategyReplace))
 			require.Nil(t, err)
 
 			// so big it effectively never triggers as part of this test
@@ -310,7 +361,7 @@ func TestSetStrategy_RecoverFromWAL(t *testing.T) {
 	}()
 
 	t.Run("without prior state", func(t *testing.T) {
-		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(),
+		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), nil,
 			WithStrategy(StrategySetCollection))
 		require.Nil(t, err)
 
@@ -409,7 +460,7 @@ func TestSetStrategy_RecoverFromWAL(t *testing.T) {
 		var bRec *Bucket
 
 		t.Run("create new bucket from existing state", func(t *testing.T) {
-			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(),
+			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), nil,
 				WithStrategy(StrategySetCollection))
 			require.Nil(t, err)
 
@@ -459,7 +510,7 @@ func TestMapStrategy_RecoverFromWAL(t *testing.T) {
 	}()
 
 	t.Run("without prior state", func(t *testing.T) {
-		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(),
+		b, err := NewBucket(testCtx(), dirNameOriginal, nullLogger(), nil,
 			WithStrategy(StrategyMapCollection))
 		require.Nil(t, err)
 
@@ -596,7 +647,7 @@ func TestMapStrategy_RecoverFromWAL(t *testing.T) {
 		var bRec *Bucket
 
 		t.Run("create new bucket from existing state", func(t *testing.T) {
-			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(),
+			b, err := NewBucket(testCtx(), dirNameRecovered, nullLogger(), nil,
 				WithStrategy(StrategyMapCollection))
 			require.Nil(t, err)
 

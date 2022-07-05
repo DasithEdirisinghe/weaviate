@@ -15,6 +15,7 @@ import (
 	"context"
 	"os"
 	"path"
+	"sync"
 
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/entities/storagestate"
@@ -27,23 +28,39 @@ type Store struct {
 	rootDir       string
 	bucketsByName map[string]*Bucket
 	logger        logrus.FieldLogger
+	metrics       *Metrics
+
+	// Prevent concurrent manipulations to the bucketsByNameMap, most notably
+	// when initializing buckets in parallel
+	bucketAccessLock sync.RWMutex
 }
 
-func New(rootDir string, logger logrus.FieldLogger) (*Store, error) {
+func New(rootDir string, logger logrus.FieldLogger,
+	metrics *Metrics) (*Store, error) {
 	s := &Store{
 		rootDir:       rootDir,
 		bucketsByName: map[string]*Bucket{},
 		logger:        logger,
+		metrics:       metrics,
 	}
 
 	return s, s.init()
 }
 
 func (s *Store) Bucket(name string) *Bucket {
+	s.bucketAccessLock.RLock()
+	defer s.bucketAccessLock.RUnlock()
+
 	return s.bucketsByName[name]
 }
 
 func (s *Store) UpdateBucketsStatus(targetStatus storagestate.Status) {
+	// UpdateBucketsStatus is a write operation on the bucket itself, but from
+	// the perspective of our bucket access map this is a read-only operation,
+	// hence an RLock()
+	s.bucketAccessLock.RLock()
+	defer s.bucketAccessLock.RUnlock()
+
 	for _, b := range s.bucketsByName {
 		if b == nil {
 			continue
@@ -73,23 +90,33 @@ func (s *Store) bucketDir(bucketName string) string {
 
 func (s *Store) CreateOrLoadBucket(ctx context.Context, bucketName string,
 	opts ...BucketOption) error {
-	if _, ok := s.bucketsByName[bucketName]; ok {
+	if b := s.Bucket(bucketName); b != nil {
 		return nil
 	}
 
-	b, err := NewBucket(ctx, s.bucketDir(bucketName), s.logger, opts...)
+	b, err := NewBucket(ctx, s.bucketDir(bucketName), s.logger, s.metrics, opts...)
 	if err != nil {
 		return err
 	}
 
-	s.bucketsByName[bucketName] = b
+	s.setBucket(bucketName, b)
 	return nil
 }
 
+func (s *Store) setBucket(name string, b *Bucket) {
+	s.bucketAccessLock.Lock()
+	defer s.bucketAccessLock.Unlock()
+
+	s.bucketsByName[name] = b
+}
+
 func (s *Store) Shutdown(ctx context.Context) error {
+	s.bucketAccessLock.RLock()
+	defer s.bucketAccessLock.RUnlock()
+
 	for name, bucket := range s.bucketsByName {
 		if err := bucket.Shutdown(ctx); err != nil {
-			return errors.Wrapf(err, "shtudown bucket %q", name)
+			return errors.Wrapf(err, "shutdown bucket %q", name)
 		}
 	}
 
@@ -97,6 +124,9 @@ func (s *Store) Shutdown(ctx context.Context) error {
 }
 
 func (s *Store) WriteWALs() error {
+	s.bucketAccessLock.RLock()
+	defer s.bucketAccessLock.RUnlock()
+
 	for name, bucket := range s.bucketsByName {
 		if err := bucket.WriteWAL(); err != nil {
 			return errors.Wrapf(err, "bucket %q", name)

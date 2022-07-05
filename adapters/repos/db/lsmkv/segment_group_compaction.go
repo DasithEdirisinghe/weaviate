@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (ig *SegmentGroup) eligbleForCompaction() bool {
@@ -128,10 +129,19 @@ func (ig *SegmentGroup) compactOnce() error {
 	secondaryIndices := ig.segmentAtPos(pair[0]).secondaryIndexCount
 
 	strategy := ig.segmentAtPos(pair[0]).strategy
+
 	switch strategy {
+
+	// TODO: call metrics just once with variable strategy label
+
 	case SegmentStrategyReplace:
 		c := newCompactorReplace(f, ig.segmentAtPos(pair[0]).newCursor(),
 			ig.segmentAtPos(pair[1]).newCursor(), level, secondaryIndices, scratchSpacePath)
+
+		if ig.metrics != nil {
+			ig.metrics.CompactionReplace.With(prometheus.Labels{"path": ig.dir}).Set(1)
+			defer ig.metrics.CompactionReplace.With(prometheus.Labels{"path": ig.dir}).Set(0)
+		}
 
 		if err := c.do(); err != nil {
 			return err
@@ -141,13 +151,24 @@ func (ig *SegmentGroup) compactOnce() error {
 			ig.segmentAtPos(pair[1]).newCollectionCursor(), level, secondaryIndices,
 			scratchSpacePath)
 
+		if ig.metrics != nil {
+			ig.metrics.CompactionSet.With(prometheus.Labels{"path": ig.dir}).Set(1)
+			defer ig.metrics.CompactionSet.With(prometheus.Labels{"path": ig.dir}).Set(0)
+		}
+
 		if err := c.do(); err != nil {
 			return err
 		}
 	case SegmentStrategyMapCollection:
-		c := newCompactorMapCollection(f, ig.segmentAtPos(pair[0]).newCollectionCursor(),
-			ig.segmentAtPos(pair[1]).newCollectionCursor(), level, secondaryIndices,
-			scratchSpacePath, ig.mapRequiresSorting)
+		c := newCompactorMapCollection(f,
+			ig.segmentAtPos(pair[0]).newCollectionCursorReusable(),
+			ig.segmentAtPos(pair[1]).newCollectionCursorReusable(),
+			level, secondaryIndices, scratchSpacePath, ig.mapRequiresSorting)
+
+		if ig.metrics != nil {
+			ig.metrics.CompactionMap.With(prometheus.Labels{"path": ig.dir}).Set(1)
+			defer ig.metrics.CompactionMap.With(prometheus.Labels{"path": ig.dir}).Set(0)
+		}
 
 		if err := c.do(); err != nil {
 			return err
@@ -201,7 +222,7 @@ func (ig *SegmentGroup) replaceCompactedSegments(old1, old2 int,
 	}
 
 	exists := ig.makeExistsOnLower(old1)
-	seg, err := newSegment(newPath, ig.logger, exists)
+	seg, err := newSegment(newPath, ig.logger, ig.metrics, exists)
 	if err != nil {
 		return errors.Wrap(err, "create new segment")
 	}
@@ -242,6 +263,8 @@ func (ig *SegmentGroup) initCompactionCycle(interval time.Duration) {
 					Debug("stop compaction cycle")
 				return
 			case <-t:
+				ig.monitorSegments()
+
 				if ig.eligbleForCompaction() {
 					if err := ig.compactOnce(); err != nil {
 						ig.logger.WithField("action", "lsm_compaction").
@@ -257,4 +280,120 @@ func (ig *SegmentGroup) initCompactionCycle(interval time.Duration) {
 			}
 		}
 	}()
+}
+
+func (ig *SegmentGroup) Len() int {
+	ig.maintenanceLock.RLock()
+	defer ig.maintenanceLock.RUnlock()
+
+	return len(ig.segments)
+}
+
+func (ig *SegmentGroup) monitorSegments() {
+	if ig.metrics == nil {
+		return
+	}
+
+	ig.metrics.ActiveSegments.With(prometheus.Labels{
+		"strategy": ig.strategy,
+		"path":     ig.dir,
+	}).Set(float64(ig.Len()))
+
+	stats := ig.segmentLevelStats()
+	stats.fillMissingLevels()
+	stats.report(ig.metrics, ig.strategy, ig.dir)
+}
+
+type segmentLevelStats struct {
+	indexes  map[uint16]int
+	payloads map[uint16]int
+	count    map[uint16]int
+}
+
+func newSegmentLevelStats() segmentLevelStats {
+	return segmentLevelStats{
+		indexes:  map[uint16]int{},
+		payloads: map[uint16]int{},
+		count:    map[uint16]int{},
+	}
+}
+
+func (ig *SegmentGroup) segmentLevelStats() segmentLevelStats {
+	ig.maintenanceLock.RLock()
+	defer ig.maintenanceLock.RUnlock()
+
+	stats := newSegmentLevelStats()
+
+	for _, seg := range ig.segments {
+		stats.count[seg.level]++
+
+		cur := stats.indexes[seg.level]
+		cur += seg.index.Size()
+		stats.indexes[seg.level] = cur
+
+		cur = stats.payloads[seg.level]
+		cur += seg.PayloadSize()
+		stats.payloads[seg.level] = cur
+	}
+
+	return stats
+}
+
+// fill missing levels
+//
+// Imagine we had exactly two segments of level 4 before, and there were just
+// compacted to single segment of level 5. As a result, there should be no
+// more segments of level 4. However, our current logic only loops over
+// existing segments. As a result, we need to check what the highest level
+// is, then for every level lower than the highest check if we are missing
+// data. If yes, we need to explicitly set the gauges to 0.
+func (s *segmentLevelStats) fillMissingLevels() {
+	maxLevel := uint16(0)
+	for level := range s.count {
+		if level > maxLevel {
+			maxLevel = level
+		}
+	}
+
+	if maxLevel > 0 {
+		for level := uint16(0); level < maxLevel; level++ {
+			if _, ok := s.count[level]; ok {
+				continue
+			}
+
+			// there is no entry for this level, we must explicitly set it to 0
+			s.count[level] = 0
+			s.indexes[level] = 0
+			s.payloads[level] = 0
+		}
+	}
+}
+
+func (s *segmentLevelStats) report(metrics *Metrics,
+	strategy, dir string) {
+	for level, size := range s.indexes {
+		metrics.SegmentSize.With(prometheus.Labels{
+			"strategy": strategy,
+			"unit":     "index",
+			"level":    fmt.Sprint(level),
+			"path":     dir,
+		}).Set(float64(size))
+	}
+
+	for level, size := range s.payloads {
+		metrics.SegmentSize.With(prometheus.Labels{
+			"strategy": strategy,
+			"unit":     "payload",
+			"level":    fmt.Sprint(level),
+			"path":     dir,
+		}).Set(float64(size))
+	}
+
+	for level, count := range s.count {
+		metrics.SegmentCount.With(prometheus.Labels{
+			"strategy": strategy,
+			"level":    fmt.Sprint(level),
+			"path":     dir,
+		}).Set(float64(count))
+	}
 }

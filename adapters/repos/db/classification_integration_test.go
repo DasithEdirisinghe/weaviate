@@ -51,11 +51,11 @@ func TestClassifications(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
+	defer repo.Shutdown(context.Background())
 	migrator := NewMigrator(repo, logger)
 
 	t.Run("importing classification schema", func(t *testing.T) {

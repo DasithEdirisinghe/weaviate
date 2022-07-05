@@ -54,11 +54,11 @@ func Test_LimitsOnChainedFilters(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
+	defer repo.Shutdown(context.Background())
 	migrator := NewMigrator(repo, logger)
 
 	t.Run("creating the class", func(t *testing.T) {
@@ -156,8 +156,7 @@ func Test_FilterLimitsAfterUpdates(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
@@ -288,8 +287,7 @@ func Test_AggregationsAfterUpdates(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)

@@ -3,4 +3,6 @@ Dockerfile.*
 Dockerfile
 docker-compose.yml
 data/
+data_wiki/
+logs/
 test/acceptance/

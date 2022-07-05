@@ -19,6 +19,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw/distancer"
 	"github.com/semi-technologies/weaviate/entities/schema"
+	"github.com/semi-technologies/weaviate/usecases/monitoring"
 	"github.com/sirupsen/logrus"
 )
 
@@ -33,6 +34,11 @@ type Config struct {
 	VectorForIDThunk      VectorForID
 	Logger                logrus.FieldLogger
 	DistanceProvider      distancer.Provider
+	PrometheusMetrics     *monitoring.PrometheusMetrics
+
+	// metadata for monitoring
+	ShardName string
+	ClassName string
 }
 
 func (c Config) Validate() error {
@@ -93,6 +99,11 @@ func (ec *errorCompounder) toError() error {
 }
 
 const (
+	DistanceCosine    = "cosine"
+	DistanceL2Squared = "l2-squared"
+)
+
+const (
 	DefaultCleanupIntervalSeconds = 5 * 60
 	DefaultMaxConnections         = 64
 	DefaultEFConstruction         = 128
@@ -103,20 +114,22 @@ const (
 	DefaultVectorCacheMaxObjects  = 2000000
 	DefaultSkip                   = false
 	DefaultFlatSearchCutoff       = 40000
+	DefaultDistanceMetric         = DistanceCosine
 )
 
 // UserConfig bundles all values settable by a user in the per-class settings
 type UserConfig struct {
-	Skip                   bool `json:"skip"`
-	CleanupIntervalSeconds int  `json:"cleanupIntervalSeconds"`
-	MaxConnections         int  `json:"maxConnections"`
-	EFConstruction         int  `json:"efConstruction"`
-	EF                     int  `json:"ef"`
-	DynamicEFMin           int  `json:"dynamicEfMin"`
-	DynamicEFMax           int  `json:"dynamicEfMax"`
-	DynamicEFFactor        int  `json:"dynamicEfFactor"`
-	VectorCacheMaxObjects  int  `json:"vectorCacheMaxObjects"`
-	FlatSearchCutoff       int  `json:"flatSearchCutoff"`
+	Skip                   bool   `json:"skip"`
+	CleanupIntervalSeconds int    `json:"cleanupIntervalSeconds"`
+	MaxConnections         int    `json:"maxConnections"`
+	EFConstruction         int    `json:"efConstruction"`
+	EF                     int    `json:"ef"`
+	DynamicEFMin           int    `json:"dynamicEfMin"`
+	DynamicEFMax           int    `json:"dynamicEfMax"`
+	DynamicEFFactor        int    `json:"dynamicEfFactor"`
+	VectorCacheMaxObjects  int    `json:"vectorCacheMaxObjects"`
+	FlatSearchCutoff       int    `json:"flatSearchCutoff"`
+	Distance               string `json:"distance"`
 }
 
 // IndexType returns the type of the underlying vector index, thus making sure
@@ -137,6 +150,7 @@ func (c *UserConfig) SetDefaults() {
 	c.DynamicEFMin = DefaultDynamicEFMin
 	c.Skip = DefaultSkip
 	c.FlatSearchCutoff = DefaultFlatSearchCutoff
+	c.Distance = DefaultDistanceMetric
 }
 
 // ParseUserConfig from an unknown input value, as this is not further
@@ -214,6 +228,12 @@ func ParseUserConfig(input interface{}) (schema.VectorIndexConfig, error) {
 		return uc, err
 	}
 
+	if err := optionalStringFromMap(asMap, "distance", func(v string) {
+		uc.Distance = v
+	}); err != nil {
+		return uc, err
+	}
+
 	return uc, nil
 }
 
@@ -256,6 +276,22 @@ func optionalBoolFromMap(in map[string]interface{}, name string,
 	}
 
 	setFn(asBool)
+	return nil
+}
+
+func optionalStringFromMap(in map[string]interface{}, name string,
+	setFn func(v string)) error {
+	value, ok := in[name]
+	if !ok {
+		return nil
+	}
+
+	asString, ok := value.(string)
+	if !ok {
+		return nil
+	}
+
+	setFn(asString)
 	return nil
 }
 

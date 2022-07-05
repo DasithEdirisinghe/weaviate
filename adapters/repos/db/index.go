@@ -13,7 +13,6 @@ package db
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/semi-technologies/weaviate/adapters/repos/db/aggregator"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted/stopwords"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/sorter"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw"
 	"github.com/semi-technologies/weaviate/entities/additional"
 	"github.com/semi-technologies/weaviate/entities/aggregation"
@@ -34,6 +34,7 @@ import (
 	"github.com/semi-technologies/weaviate/entities/search"
 	"github.com/semi-technologies/weaviate/entities/searchparams"
 	"github.com/semi-technologies/weaviate/entities/storobj"
+	"github.com/semi-technologies/weaviate/usecases/monitoring"
 	"github.com/semi-technologies/weaviate/usecases/objects"
 	schemaUC "github.com/semi-technologies/weaviate/usecases/schema"
 	"github.com/semi-technologies/weaviate/usecases/sharding"
@@ -56,6 +57,8 @@ type Index struct {
 
 	invertedIndexConfig     schema.InvertedIndexConfig
 	invertedIndexConfigLock sync.Mutex
+
+	metrics *Metrics
 }
 
 func (i *Index) ID() string {
@@ -72,7 +75,8 @@ func NewIndex(ctx context.Context, config IndexConfig,
 	shardState *sharding.State, invertedIndexConfig schema.InvertedIndexConfig,
 	vectorIndexUserConfig schema.VectorIndexConfig, sg schemaUC.SchemaGetter,
 	cs inverted.ClassSearcher, logger logrus.FieldLogger,
-	nodeResolver nodeResolver, remoteClient sharding.RemoteIndexClient) (*Index, error) {
+	nodeResolver nodeResolver, remoteClient sharding.RemoteIndexClient,
+	promMetrics *monitoring.PrometheusMetrics) (*Index, error) {
 	sd, err := stopwords.NewDetectorFromConfig(invertedIndexConfig.Stopwords)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create new index")
@@ -89,6 +93,7 @@ func NewIndex(ctx context.Context, config IndexConfig,
 		stopwords:             sd,
 		remote: sharding.NewRemoteIndex(config.ClassName.String(), sg,
 			nodeResolver, remoteClient),
+		metrics: NewMetrics(logger, promMetrics, config.ClassName.String(), "n/a"),
 	}
 
 	if err := index.checkSingleShardMigration(shardState); err != nil {
@@ -102,7 +107,7 @@ func NewIndex(ctx context.Context, config IndexConfig,
 			continue
 		}
 
-		shard, err := NewShard(ctx, shardName, index)
+		shard, err := NewShard(ctx, promMetrics, shardName, index)
 		if err != nil {
 			return nil, errors.Wrapf(err, "init shard %s of index %s", shardName, index.ID())
 		}
@@ -127,6 +132,16 @@ func (i *Index) addUUIDProperty(ctx context.Context) error {
 	for name, shard := range i.Shards {
 		if err := shard.addIDProperty(ctx); err != nil {
 			return errors.Wrapf(err, "add id property to shard %q", name)
+		}
+	}
+
+	return nil
+}
+
+func (i *Index) addTimestampProperties(ctx context.Context) error {
+	for name, shard := range i.Shards {
+		if err := shard.addTimestampProperties(ctx); err != nil {
+			return errors.Wrapf(err, "add timestamp properties to shard %q", name)
 		}
 	}
 
@@ -638,8 +653,8 @@ func (i *Index) IncomingExists(ctx context.Context, shardName string,
 	return ok, nil
 }
 
-func (i *Index) objectSearch(ctx context.Context, limit int,
-	filters *filters.LocalFilter, keywordRanking *searchparams.KeywordRanking,
+func (i *Index) objectSearch(ctx context.Context, limit int, filters *filters.LocalFilter,
+	keywordRanking *searchparams.KeywordRanking, sort []filters.Sort,
 	additional additional.Properties) ([]*storobj.Object, error) {
 	shardNames := i.getSchema.ShardingState(i.Config.ClassName.String()).
 		AllPhysicalShards()
@@ -657,14 +672,14 @@ func (i *Index) objectSearch(ctx context.Context, limit int,
 
 		if local {
 			shard := i.Shards[shardName]
-			objs, scores, err = shard.objectSearch(ctx, limit, filters, keywordRanking, additional)
+			objs, scores, err = shard.objectSearch(ctx, limit, filters, keywordRanking, sort, additional)
 			if err != nil {
 				return nil, errors.Wrapf(err, "shard %s", shard.ID())
 			}
 
 		} else {
 			objs, scores, err = i.remote.SearchShard(
-				ctx, shardName, nil, limit, filters, keywordRanking, additional)
+				ctx, shardName, nil, limit, filters, keywordRanking, sort, additional)
 			if err != nil {
 				return nil, errors.Wrapf(err, "remote shard %s", shardName)
 			}
@@ -673,25 +688,51 @@ func (i *Index) objectSearch(ctx context.Context, limit int,
 		outScores = append(outScores, scores...)
 	}
 
-	if keywordRanking != nil {
-		res := &inverted.RankedResults{
-			Objects: outObjects,
-			Scores:  outScores,
+	if len(sort) > 0 {
+		if len(shardNames) > 1 {
+			sortedObjs, _, err := i.sort(outObjects, outScores, sort, limit)
+			if err != nil {
+				return nil, errors.Wrap(err, "sort")
+			}
+			return sortedObjs, nil
 		}
-		sort.Sort(res)
-		outObjects = res.Objects
+		return outObjects, nil
 	}
 
-	if len(outObjects) > limit {
+	if keywordRanking != nil {
+		outObjects, _ = i.sortKeywordRanking(outObjects, outScores)
+	}
+
+	// if this search was caused by a reference property
+	// search, we should not limit the number of results.
+	// for example, if the query contains a where filter
+	// whose operator is `And`, and one of the operands
+	// contains a path to a reference prop, the ClassSearch
+	// caused by such a ref prop being limited can cause
+	// the `And` to return no results where results would
+	// be expected. we won't know that unless we search
+	// and return all referenced object properties.
+	if !additional.ReferenceQuery && len(outObjects) > limit {
 		outObjects = outObjects[:limit]
 	}
 
 	return outObjects, nil
 }
 
+func (i *Index) sortKeywordRanking(objects []*storobj.Object,
+	scores []float32) ([]*storobj.Object, []float32) {
+	return newScoresSorter().sort(objects, scores)
+}
+
+func (i *Index) sort(objects []*storobj.Object, scores []float32,
+	sort []filters.Sort, limit int) ([]*storobj.Object, []float32, error) {
+	return sorter.New(i.getSchema.GetSchemaSkipAuth()).
+		Sort(objects, scores, limit, sort)
+}
+
 func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 	dist float32, limit int, filters *filters.LocalFilter,
-	additional additional.Properties) ([]*storobj.Object, []float32, error) {
+	sort []filters.Sort, additional additional.Properties) ([]*storobj.Object, []float32, error) {
 	shardNames := i.getSchema.ShardingState(i.Config.ClassName.String()).
 		AllPhysicalShards()
 
@@ -699,7 +740,7 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 	m := &sync.Mutex{}
 
 	// a limit of -1 is used to signal a search by distance. if that is
-	// the case we have to adjust how we calculate the outpout capacity
+	// the case we have to adjust how we calculate the output capacity
 	var shardCap int
 	if limit < 0 {
 		shardCap = len(shardNames) * hnsw.DefaultSearchByDistInitialLimit
@@ -723,13 +764,13 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 			if local {
 				shard := i.Shards[shardName]
 				res, resDists, err = shard.objectVectorSearch(
-					ctx, searchVector, dist, limit, filters, additional)
+					ctx, searchVector, dist, limit, filters, sort, additional)
 				if err != nil {
 					return errors.Wrapf(err, "shard %s", shard.ID())
 				}
 			} else {
 				res, resDists, err = i.remote.SearchShard(
-					ctx, shardName, searchVector, limit, filters, nil, additional)
+					ctx, shardName, searchVector, limit, filters, nil, sort, additional)
 				if err != nil {
 					return errors.Wrapf(err, "remote shard %s", shardName)
 				}
@@ -752,19 +793,22 @@ func (i *Index) objectVectorSearch(ctx context.Context, searchVector []float32,
 		return out, dists, nil
 	}
 
-	sbd := sortObjsByDist{out, dists}
-	sort.Sort(sbd)
-	if len(sbd.objects) > limit {
-		sbd.objects = sbd.objects[:limit]
-		sbd.distances = sbd.distances[:limit]
+	if len(shardNames) > 1 && len(sort) > 0 {
+		return i.sort(out, dists, sort, limit)
 	}
 
-	return sbd.objects, sbd.distances, nil
+	out, dists = newDistancesSorter().sort(out, dists)
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+		dists = dists[:limit]
+	}
+
+	return out, dists, nil
 }
 
 func (i *Index) IncomingSearch(ctx context.Context, shardName string,
 	searchVector []float32, distance float32, limit int, filters *filters.LocalFilter,
-	keywordRanking *searchparams.KeywordRanking,
+	keywordRanking *searchparams.KeywordRanking, sort []filters.Sort,
 	additional additional.Properties) ([]*storobj.Object, []float32, error) {
 	shard, ok := i.Shards[shardName]
 	if !ok {
@@ -772,7 +816,7 @@ func (i *Index) IncomingSearch(ctx context.Context, shardName string,
 	}
 
 	if searchVector == nil {
-		res, scores, err := shard.objectSearch(ctx, limit, filters, keywordRanking, additional)
+		res, scores, err := shard.objectSearch(ctx, limit, filters, keywordRanking, sort, additional)
 		if err != nil {
 			return nil, nil, errors.Wrapf(err, "shard %s", shard.ID())
 		}
@@ -781,7 +825,7 @@ func (i *Index) IncomingSearch(ctx context.Context, shardName string,
 	}
 
 	res, resDists, err := shard.objectVectorSearch(
-		ctx, searchVector, distance, limit, filters, additional)
+		ctx, searchVector, distance, limit, filters, sort, additional)
 	if err != nil {
 		return nil, nil, errors.Wrapf(err, "shard %s", shard.ID())
 	}
@@ -962,4 +1006,103 @@ func (i *Index) notifyReady() {
 	for _, shd := range i.Shards {
 		shd.notifyReady()
 	}
+}
+
+func (i *Index) findDocIDs(ctx context.Context,
+	filters *filters.LocalFilter) (map[string][]uint64, error) {
+	before := time.Now()
+	defer i.metrics.BatchDelete(before, "filter_total")
+
+	shardState := i.getSchema.ShardingState(i.Config.ClassName.String())
+	shardNames := shardState.AllPhysicalShards()
+
+	results := make(map[string][]uint64)
+	for _, shardName := range shardNames {
+		local := shardState.IsShardLocal(shardName)
+
+		var err error
+		var res []uint64
+		if !local {
+			res, err = i.remote.FindDocIDs(ctx, shardName, filters)
+		} else {
+			shard := i.Shards[shardName]
+			res, err = shard.findDocIDs(ctx, filters)
+		}
+		if err != nil {
+			return nil, errors.Wrapf(err, "shard %s", shardName)
+		}
+
+		results[shardName] = res
+	}
+
+	return results, nil
+}
+
+func (i *Index) IncomingFindDocIDs(ctx context.Context, shardName string,
+	filters *filters.LocalFilter) ([]uint64, error) {
+	shard, ok := i.Shards[shardName]
+	if !ok {
+		return nil, errors.Errorf("shard %q does not exist locally", shardName)
+	}
+
+	docIDs, err := shard.findDocIDs(ctx, filters)
+	if err != nil {
+		return nil, errors.Wrapf(err, "shard %s", shard.ID())
+	}
+
+	return docIDs, nil
+}
+
+func (i *Index) batchDeleteObjects(ctx context.Context,
+	shardDocIDs map[string][]uint64, dryRun bool) (objects.BatchSimpleObjects, error) {
+	before := time.Now()
+	defer i.metrics.BatchDelete(before, "delete_from_shards_total")
+
+	type result struct {
+		objs objects.BatchSimpleObjects
+	}
+
+	wg := &sync.WaitGroup{}
+	ch := make(chan result, len(shardDocIDs))
+	for shardName, docIDs := range shardDocIDs {
+		wg.Add(1)
+		go func(shardName string, docIDs []uint64) {
+			defer wg.Done()
+
+			local := i.getSchema.
+				ShardingState(i.Config.ClassName.String()).
+				IsShardLocal(shardName)
+
+			var objs objects.BatchSimpleObjects
+			if !local {
+				objs = i.remote.DeleteObjectBatch(ctx, shardName, docIDs, dryRun)
+			} else {
+				shard := i.Shards[shardName]
+				objs = shard.deleteObjectBatch(ctx, docIDs, dryRun)
+			}
+			ch <- result{objs}
+		}(shardName, docIDs)
+	}
+
+	wg.Wait()
+	close(ch)
+
+	var out objects.BatchSimpleObjects
+	for res := range ch {
+		out = append(out, res.objs...)
+	}
+
+	return out, nil
+}
+
+func (i *Index) IncomingDeleteObjectBatch(ctx context.Context, shardName string,
+	docIDs []uint64, dryRun bool) objects.BatchSimpleObjects {
+	shard, ok := i.Shards[shardName]
+	if !ok {
+		return objects.BatchSimpleObjects{
+			objects.BatchSimpleObject{Err: errors.Errorf("shard %q does not exist locally", shardName)},
+		}
+	}
+
+	return shard.deleteObjectBatch(ctx, docIDs, dryRun)
 }

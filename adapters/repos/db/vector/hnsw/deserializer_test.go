@@ -125,3 +125,72 @@ func TestDeserializer2ReadCommitType(t *testing.T) {
 
 	}
 }
+
+func TestDeserializerReadDeleteNode(t *testing.T) {
+	nodes := generateDummyVertices(4)
+	res := &DeserializationResult{
+		Nodes: nodes,
+	}
+	ids := []uint64{2, 3, 4, 5, 6}
+
+	for _, id := range ids {
+		val := make([]byte, 8)
+		binary.LittleEndian.PutUint64(val, id)
+		data := bytes.NewReader(val)
+		logger, _ := test.NewNullLogger()
+		d := NewDeserializer(logger)
+		reader := bufio.NewReader(data)
+
+		err := d.ReadDeleteNode(reader, res)
+		if err != nil {
+			t.Errorf("Error reading commit type: %v", err)
+		}
+	}
+}
+
+func TestDeserializerReadClearLinks(t *testing.T) {
+	nodes := generateDummyVertices(4)
+	res := &DeserializationResult{
+		Nodes: nodes,
+	}
+	ids := []uint64{2, 3, 4, 5, 6}
+
+	for _, id := range ids {
+		val := make([]byte, 8)
+		binary.LittleEndian.PutUint64(val, id)
+		data := bytes.NewReader(val)
+		logger, _ := test.NewNullLogger()
+		d := NewDeserializer(logger)
+
+		reader := bufio.NewReader(data)
+
+		err := d.ReadClearLinks(reader, res, true)
+		if err != nil {
+			t.Errorf("Error reading links: %v", err)
+		}
+	}
+}
+
+func TestDeserializerReadClearLinksAtLevel(t *testing.T) {
+	nodes := generateDummyVertices(4)
+	res := &DeserializationResult{
+		Nodes: nodes,
+	}
+	ids := []uint64{2, 3, 4, 5, 6}
+
+	for _, id := range ids {
+		val := make([]byte, 10)
+		binary.LittleEndian.PutUint64(val, id)
+		binary.LittleEndian.PutUint16(val, uint16(id))
+		data := bytes.NewReader(val)
+		logger, _ := test.NewNullLogger()
+		d := NewDeserializer(logger)
+
+		reader := bufio.NewReader(data)
+
+		err := d.ReadClearLinksAtLevel(reader, res, false)
+		if err != nil {
+			t.Errorf("Error reading links at level: %v", err)
+		}
+	}
+}

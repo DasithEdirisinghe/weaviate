@@ -14,15 +14,20 @@ package hnsw
 import (
 	"math"
 	"math/rand"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw/distancer"
 )
 
 func (h *hnsw) Add(id uint64, vector []float32) error {
+	before := time.Now()
 	if len(vector) == 0 {
 		return errors.Errorf("insert called with nil-vector")
 	}
+
+	h.metrics.InsertVector()
+	defer h.metrics.TrackInsert(before, "total")
 
 	node := &vertex{
 		id: id,
@@ -67,6 +72,8 @@ func (h *hnsw) insertInitialElement(node *vertex, nodeVec []float32) error {
 }
 
 func (h *hnsw) insert(node *vertex, nodeVec []float32) error {
+	before := time.Now()
+
 	wasFirst := false
 	var firstInsertError error
 	h.initialInsertOnce.Do(func() {
@@ -81,14 +88,14 @@ func (h *hnsw) insert(node *vertex, nodeVec []float32) error {
 
 	node.markAsMaintenance()
 
-	h.Lock()
+	h.RLock()
 	// initially use the "global" entrypoint which is guaranteed to be on the
 	// currently highest layer
 	entryPointID := h.entryPointID
 	// initially use the level of the entrypoint which is the highest level of
 	// the h-graph in the first iteration
 	currentMaximumLayer := h.currentMaximumLayer
-	h.Unlock()
+	h.RUnlock()
 
 	targetLevel := int(math.Floor(-math.Log(rand.Float64()) * h.levelNormalizer))
 
@@ -130,16 +137,26 @@ func (h *hnsw) insert(node *vertex, nodeVec []float32) error {
 	h.nodes[nodeId] = node
 	h.Unlock()
 
+	h.metrics.TrackInsert(before, "prepare_and_insert_node")
+	before = time.Now()
+
 	entryPointID, err = h.findBestEntrypointForNode(currentMaximumLayer, targetLevel,
 		entryPointID, nodeVec)
 	if err != nil {
 		return errors.Wrap(err, "find best entrypoint")
 	}
 
+	h.metrics.TrackInsert(before, "find_entrypoint")
+	before = time.Now()
+
 	if err := h.findAndConnectNeighbors(node, entryPointID, nodeVec,
 		targetLevel, currentMaximumLayer, nil); err != nil {
 		return errors.Wrap(err, "find and connect neighbors")
 	}
+
+	h.metrics.TrackInsert(before, "find_and_connect_total")
+	before = time.Now()
+	defer h.metrics.TrackInsert(before, "update_global_entrypoint")
 
 	// go h.insertHook(nodeId, targetLevel, neighborsAtLevel)
 	node.unmarkAsMaintenance()

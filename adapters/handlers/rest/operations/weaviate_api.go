@@ -69,6 +69,9 @@ func NewWeaviateAPI(spec *loads.Document) *WeaviateAPI {
 		BatchBatchObjectsCreateHandler: batch.BatchObjectsCreateHandlerFunc(func(params batch.BatchObjectsCreateParams, principal *models.Principal) middleware.Responder {
 			return middleware.NotImplemented("operation batch.BatchObjectsCreate has not yet been implemented")
 		}),
+		BatchBatchObjectsDeleteHandler: batch.BatchObjectsDeleteHandlerFunc(func(params batch.BatchObjectsDeleteParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation batch.BatchObjectsDelete has not yet been implemented")
+		}),
 		BatchBatchReferencesCreateHandler: batch.BatchReferencesCreateHandlerFunc(func(params batch.BatchReferencesCreateParams, principal *models.Principal) middleware.Responder {
 			return middleware.NotImplemented("operation batch.BatchReferencesCreate has not yet been implemented")
 		}),
@@ -86,6 +89,30 @@ func NewWeaviateAPI(spec *loads.Document) *WeaviateAPI {
 		}),
 		MetaMetaGetHandler: meta.MetaGetHandlerFunc(func(params meta.MetaGetParams, principal *models.Principal) middleware.Responder {
 			return middleware.NotImplemented("operation meta.MetaGet has not yet been implemented")
+		}),
+		ObjectsObjectsClassDeleteHandler: objects.ObjectsClassDeleteHandlerFunc(func(params objects.ObjectsClassDeleteParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassDelete has not yet been implemented")
+		}),
+		ObjectsObjectsClassGetHandler: objects.ObjectsClassGetHandlerFunc(func(params objects.ObjectsClassGetParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassGet has not yet been implemented")
+		}),
+		ObjectsObjectsClassHeadHandler: objects.ObjectsClassHeadHandlerFunc(func(params objects.ObjectsClassHeadParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassHead has not yet been implemented")
+		}),
+		ObjectsObjectsClassPatchHandler: objects.ObjectsClassPatchHandlerFunc(func(params objects.ObjectsClassPatchParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassPatch has not yet been implemented")
+		}),
+		ObjectsObjectsClassPutHandler: objects.ObjectsClassPutHandlerFunc(func(params objects.ObjectsClassPutParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassPut has not yet been implemented")
+		}),
+		ObjectsObjectsClassReferencesCreateHandler: objects.ObjectsClassReferencesCreateHandlerFunc(func(params objects.ObjectsClassReferencesCreateParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassReferencesCreate has not yet been implemented")
+		}),
+		ObjectsObjectsClassReferencesDeleteHandler: objects.ObjectsClassReferencesDeleteHandlerFunc(func(params objects.ObjectsClassReferencesDeleteParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassReferencesDelete has not yet been implemented")
+		}),
+		ObjectsObjectsClassReferencesPutHandler: objects.ObjectsClassReferencesPutHandlerFunc(func(params objects.ObjectsClassReferencesPutParams, principal *models.Principal) middleware.Responder {
+			return middleware.NotImplemented("operation objects.ObjectsClassReferencesPut has not yet been implemented")
 		}),
 		ObjectsObjectsCreateHandler: objects.ObjectsCreateHandlerFunc(func(params objects.ObjectsCreateParams, principal *models.Principal) middleware.Responder {
 			return middleware.NotImplemented("operation objects.ObjectsCreate has not yet been implemented")
@@ -206,6 +233,8 @@ type WeaviateAPI struct {
 	WellKnownGetWellKnownOpenidConfigurationHandler well_known.GetWellKnownOpenidConfigurationHandler
 	// BatchBatchObjectsCreateHandler sets the operation handler for the batch objects create operation
 	BatchBatchObjectsCreateHandler batch.BatchObjectsCreateHandler
+	// BatchBatchObjectsDeleteHandler sets the operation handler for the batch objects delete operation
+	BatchBatchObjectsDeleteHandler batch.BatchObjectsDeleteHandler
 	// BatchBatchReferencesCreateHandler sets the operation handler for the batch references create operation
 	BatchBatchReferencesCreateHandler batch.BatchReferencesCreateHandler
 	// ClassificationsClassificationsGetHandler sets the operation handler for the classifications get operation
@@ -218,6 +247,22 @@ type WeaviateAPI struct {
 	GraphqlGraphqlPostHandler graphql.GraphqlPostHandler
 	// MetaMetaGetHandler sets the operation handler for the meta get operation
 	MetaMetaGetHandler meta.MetaGetHandler
+	// ObjectsObjectsClassDeleteHandler sets the operation handler for the objects class delete operation
+	ObjectsObjectsClassDeleteHandler objects.ObjectsClassDeleteHandler
+	// ObjectsObjectsClassGetHandler sets the operation handler for the objects class get operation
+	ObjectsObjectsClassGetHandler objects.ObjectsClassGetHandler
+	// ObjectsObjectsClassHeadHandler sets the operation handler for the objects class head operation
+	ObjectsObjectsClassHeadHandler objects.ObjectsClassHeadHandler
+	// ObjectsObjectsClassPatchHandler sets the operation handler for the objects class patch operation
+	ObjectsObjectsClassPatchHandler objects.ObjectsClassPatchHandler
+	// ObjectsObjectsClassPutHandler sets the operation handler for the objects class put operation
+	ObjectsObjectsClassPutHandler objects.ObjectsClassPutHandler
+	// ObjectsObjectsClassReferencesCreateHandler sets the operation handler for the objects class references create operation
+	ObjectsObjectsClassReferencesCreateHandler objects.ObjectsClassReferencesCreateHandler
+	// ObjectsObjectsClassReferencesDeleteHandler sets the operation handler for the objects class references delete operation
+	ObjectsObjectsClassReferencesDeleteHandler objects.ObjectsClassReferencesDeleteHandler
+	// ObjectsObjectsClassReferencesPutHandler sets the operation handler for the objects class references put operation
+	ObjectsObjectsClassReferencesPutHandler objects.ObjectsClassReferencesPutHandler
 	// ObjectsObjectsCreateHandler sets the operation handler for the objects create operation
 	ObjectsObjectsCreateHandler objects.ObjectsCreateHandler
 	// ObjectsObjectsDeleteHandler sets the operation handler for the objects delete operation
@@ -341,6 +386,9 @@ func (o *WeaviateAPI) Validate() error {
 	if o.BatchBatchObjectsCreateHandler == nil {
 		unregistered = append(unregistered, "batch.BatchObjectsCreateHandler")
 	}
+	if o.BatchBatchObjectsDeleteHandler == nil {
+		unregistered = append(unregistered, "batch.BatchObjectsDeleteHandler")
+	}
 	if o.BatchBatchReferencesCreateHandler == nil {
 		unregistered = append(unregistered, "batch.BatchReferencesCreateHandler")
 	}
@@ -358,6 +406,30 @@ func (o *WeaviateAPI) Validate() error {
 	}
 	if o.MetaMetaGetHandler == nil {
 		unregistered = append(unregistered, "meta.MetaGetHandler")
+	}
+	if o.ObjectsObjectsClassDeleteHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassDeleteHandler")
+	}
+	if o.ObjectsObjectsClassGetHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassGetHandler")
+	}
+	if o.ObjectsObjectsClassHeadHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassHeadHandler")
+	}
+	if o.ObjectsObjectsClassPatchHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassPatchHandler")
+	}
+	if o.ObjectsObjectsClassPutHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassPutHandler")
+	}
+	if o.ObjectsObjectsClassReferencesCreateHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassReferencesCreateHandler")
+	}
+	if o.ObjectsObjectsClassReferencesDeleteHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassReferencesDeleteHandler")
+	}
+	if o.ObjectsObjectsClassReferencesPutHandler == nil {
+		unregistered = append(unregistered, "objects.ObjectsClassReferencesPutHandler")
 	}
 	if o.ObjectsObjectsCreateHandler == nil {
 		unregistered = append(unregistered, "objects.ObjectsCreateHandler")
@@ -533,6 +605,10 @@ func (o *WeaviateAPI) initHandlerCache() {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
 	o.handlers["POST"]["/batch/objects"] = batch.NewBatchObjectsCreate(o.context, o.BatchBatchObjectsCreateHandler)
+	if o.handlers["DELETE"] == nil {
+		o.handlers["DELETE"] = make(map[string]http.Handler)
+	}
+	o.handlers["DELETE"]["/batch/objects"] = batch.NewBatchObjectsDelete(o.context, o.BatchBatchObjectsDeleteHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}
@@ -557,6 +633,38 @@ func (o *WeaviateAPI) initHandlerCache() {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
 	o.handlers["GET"]["/meta"] = meta.NewMetaGet(o.context, o.MetaMetaGetHandler)
+	if o.handlers["DELETE"] == nil {
+		o.handlers["DELETE"] = make(map[string]http.Handler)
+	}
+	o.handlers["DELETE"]["/objects/{className}/{id}"] = objects.NewObjectsClassDelete(o.context, o.ObjectsObjectsClassDeleteHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/objects/{className}/{id}"] = objects.NewObjectsClassGet(o.context, o.ObjectsObjectsClassGetHandler)
+	if o.handlers["HEAD"] == nil {
+		o.handlers["HEAD"] = make(map[string]http.Handler)
+	}
+	o.handlers["HEAD"]["/objects/{className}/{id}"] = objects.NewObjectsClassHead(o.context, o.ObjectsObjectsClassHeadHandler)
+	if o.handlers["PATCH"] == nil {
+		o.handlers["PATCH"] = make(map[string]http.Handler)
+	}
+	o.handlers["PATCH"]["/objects/{className}/{id}"] = objects.NewObjectsClassPatch(o.context, o.ObjectsObjectsClassPatchHandler)
+	if o.handlers["PUT"] == nil {
+		o.handlers["PUT"] = make(map[string]http.Handler)
+	}
+	o.handlers["PUT"]["/objects/{className}/{id}"] = objects.NewObjectsClassPut(o.context, o.ObjectsObjectsClassPutHandler)
+	if o.handlers["POST"] == nil {
+		o.handlers["POST"] = make(map[string]http.Handler)
+	}
+	o.handlers["POST"]["/objects/{className}/{id}/references/{propertyName}"] = objects.NewObjectsClassReferencesCreate(o.context, o.ObjectsObjectsClassReferencesCreateHandler)
+	if o.handlers["DELETE"] == nil {
+		o.handlers["DELETE"] = make(map[string]http.Handler)
+	}
+	o.handlers["DELETE"]["/objects/{className}/{id}/references/{propertyName}"] = objects.NewObjectsClassReferencesDelete(o.context, o.ObjectsObjectsClassReferencesDeleteHandler)
+	if o.handlers["PUT"] == nil {
+		o.handlers["PUT"] = make(map[string]http.Handler)
+	}
+	o.handlers["PUT"]["/objects/{className}/{id}/references/{propertyName}"] = objects.NewObjectsClassReferencesPut(o.context, o.ObjectsObjectsClassReferencesPutHandler)
 	if o.handlers["POST"] == nil {
 		o.handlers["POST"] = make(map[string]http.Handler)
 	}

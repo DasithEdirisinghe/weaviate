@@ -35,6 +35,8 @@ type SegmentGroup struct {
 	maintenanceLock sync.RWMutex
 	dir             string
 
+	strategy string
+
 	stopCompactionCycle chan struct{}
 
 	logger logrus.FieldLogger
@@ -45,11 +47,18 @@ type SegmentGroup struct {
 
 	status     storagestate.Status
 	statusLock sync.Mutex
+	metrics    *Metrics
+
+	// all "replace" buckets support counting through net additions, but not all
+	// produce a meaningful count. Typically we the only count we're interested
+	// in is that of the bucket that holds objects
+	monitorCount bool
 }
 
 func newSegmentGroup(dir string,
 	compactionCycle time.Duration, logger logrus.FieldLogger,
-	mapRequiresSorting bool) (*SegmentGroup, error) {
+	mapRequiresSorting bool, metrics *Metrics, strategy string,
+	monitorCount bool) (*SegmentGroup, error) {
 	list, err := ioutil.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -59,8 +68,11 @@ func newSegmentGroup(dir string,
 		segments:            make([]*segment, len(list)),
 		dir:                 dir,
 		logger:              logger,
+		metrics:             metrics,
+		monitorCount:        monitorCount,
 		stopCompactionCycle: make(chan struct{}),
 		mapRequiresSorting:  mapRequiresSorting,
+		strategy:            strategy,
 	}
 
 	segmentIndex := 0
@@ -99,7 +111,7 @@ func newSegmentGroup(dir string,
 		}
 
 		segment, err := newSegment(filepath.Join(dir, fileInfo.Name()), logger,
-			out.makeExistsOnLower(segmentIndex))
+			metrics, out.makeExistsOnLower(segmentIndex))
 		if err != nil {
 			return nil, errors.Wrapf(err, "init segment %s", fileInfo.Name())
 		}
@@ -109,6 +121,10 @@ func newSegmentGroup(dir string,
 	}
 
 	out.segments = out.segments[:segmentIndex]
+
+	if out.monitorCount {
+		out.metrics.ObjectCount(out.count())
+	}
 
 	out.initCompactionCycle(compactionCycle)
 	return out, nil
@@ -137,7 +153,8 @@ func (ig *SegmentGroup) add(path string) error {
 	defer ig.maintenanceLock.Unlock()
 
 	newSegmentIndex := len(ig.segments)
-	segment, err := newSegment(path, ig.logger, ig.makeExistsOnLower(newSegmentIndex))
+	segment, err := newSegment(path, ig.logger, ig.metrics,
+		ig.makeExistsOnLower(newSegmentIndex))
 	if err != nil {
 		return errors.Wrapf(err, "init segment %s", path)
 	}

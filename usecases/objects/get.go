@@ -15,18 +15,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/go-openapi/strfmt"
 	"github.com/semi-technologies/weaviate/entities/additional"
+	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/models"
 	"github.com/semi-technologies/weaviate/entities/schema"
 	"github.com/semi-technologies/weaviate/entities/search"
 )
 
 // GetObject Class from the connected DB
-func (m *Manager) GetObject(ctx context.Context, principal *models.Principal,
+func (m *Manager) GetObject(ctx context.Context, principal *models.Principal, class string,
 	id strfmt.UUID, additional additional.Properties) (*models.Object, error) {
-	err := m.authorizer.Authorize(principal, "get", fmt.Sprintf("objects/%s", id.String()))
+	path := fmt.Sprintf("objects/%s", id)
+	if class != "" {
+		path = fmt.Sprintf("objects/%s/%s", class, id)
+	}
+	err := m.authorizer.Authorize(principal, "get", path)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +43,7 @@ func (m *Manager) GetObject(ctx context.Context, principal *models.Principal,
 	}
 	defer unlock()
 
-	res, err := m.getObjectFromRepo(ctx, id, additional)
+	res, err := m.getObjectFromRepo(ctx, class, id, additional)
 	if err != nil {
 		return nil, err
 	}
@@ -47,7 +53,7 @@ func (m *Manager) GetObject(ctx context.Context, principal *models.Principal,
 
 // GetObjects Class from the connected DB
 func (m *Manager) GetObjects(ctx context.Context, principal *models.Principal,
-	offset, limit *int64, additional additional.Properties) ([]*models.Object, error) {
+	offset, limit *int64, sort, order *string, additional additional.Properties) ([]*models.Object, error) {
 	err := m.authorizer.Authorize(principal, "list", "objects")
 	if err != nil {
 		return nil, err
@@ -59,7 +65,7 @@ func (m *Manager) GetObjects(ctx context.Context, principal *models.Principal,
 	}
 	defer unlock()
 
-	return m.getObjectsFromRepo(ctx, offset, limit, additional)
+	return m.getObjectsFromRepo(ctx, offset, limit, sort, order, additional)
 }
 
 func (m *Manager) GetObjectsClass(ctx context.Context, principal *models.Principal,
@@ -75,7 +81,7 @@ func (m *Manager) GetObjectsClass(ctx context.Context, principal *models.Princip
 	}
 	defer unlock()
 
-	res, err := m.getObjectFromRepo(ctx, id, additional.Properties{})
+	res, err := m.getObjectFromRepo(ctx, "", id, additional.Properties{})
 	if err != nil {
 		return nil, err
 	}
@@ -88,9 +94,13 @@ func (m *Manager) GetObjectsClass(ctx context.Context, principal *models.Princip
 	return s.GetClass(schema.ClassName(res.ClassName)), nil
 }
 
-func (m *Manager) getObjectFromRepo(ctx context.Context, id strfmt.UUID,
-	additional additional.Properties) (*search.Result, error) {
-	res, err := m.vectorRepo.ObjectByID(ctx, id, search.SelectProperties{}, additional)
+func (m *Manager) getObjectFromRepo(ctx context.Context, class string, id strfmt.UUID,
+	adds additional.Properties) (res *search.Result, err error) {
+	if class != "" {
+		res, err = m.vectorRepo.Object(ctx, class, id, search.SelectProperties{}, adds)
+	} else {
+		res, err = m.vectorRepo.ObjectByID(ctx, id, search.SelectProperties{}, adds)
+	}
 	if err != nil {
 		return nil, NewErrInternal("repo: object by id: %v", err)
 	}
@@ -100,7 +110,7 @@ func (m *Manager) getObjectFromRepo(ctx context.Context, id strfmt.UUID,
 	}
 
 	if m.modulesProvider != nil {
-		res, err = m.modulesProvider.GetObjectAdditionalExtend(ctx, res, additional.ModuleParams)
+		res, err = m.modulesProvider.GetObjectAdditionalExtend(ctx, res, adds.ModuleParams)
 		if err != nil {
 			return nil, fmt.Errorf("get extend: %v", err)
 		}
@@ -110,12 +120,13 @@ func (m *Manager) getObjectFromRepo(ctx context.Context, id strfmt.UUID,
 }
 
 func (m *Manager) getObjectsFromRepo(ctx context.Context, offset, limit *int64,
-	additional additional.Properties) ([]*models.Object, error) {
+	sort, order *string, additional additional.Properties) ([]*models.Object, error) {
 	smartOffset, smartLimit, err := m.localOffsetLimit(offset, limit)
 	if err != nil {
 		return nil, NewErrInternal("list objects: %v", err)
 	}
-	res, err := m.vectorRepo.ObjectSearch(ctx, smartOffset, smartLimit, nil, additional)
+	res, err := m.vectorRepo.ObjectSearch(ctx, smartOffset, smartLimit,
+		nil, m.getSort(sort, order), additional)
 	if err != nil {
 		return nil, NewErrInternal("list objects: %v", err)
 	}
@@ -128,6 +139,37 @@ func (m *Manager) getObjectsFromRepo(ctx context.Context, offset, limit *int64,
 	}
 
 	return res.ObjectsWithVector(additional.Vector), nil
+}
+
+func (m *Manager) getSort(sort, order *string) []filters.Sort {
+	if sort != nil {
+		sortParams := strings.Split(*sort, ",")
+		var orderParams []string
+		if order != nil {
+			orderParams = strings.Split(*order, ",")
+		}
+		var res []filters.Sort
+		for i := range sortParams {
+			res = append(res, filters.Sort{
+				Path:  []string{sortParams[i]},
+				Order: m.getOrder(orderParams, i),
+			})
+		}
+		return res
+	}
+	return nil
+}
+
+func (m *Manager) getOrder(order []string, i int) string {
+	if len(order) > i {
+		switch order[i] {
+		case "asc", "desc":
+			return order[i]
+		default:
+			return "asc"
+		}
+	}
+	return "asc"
 }
 
 func (m *Manager) localOffsetOrZero(paramOffset *int64) int {

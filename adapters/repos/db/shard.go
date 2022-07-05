@@ -29,9 +29,11 @@ import (
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/hnsw/distancer"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/vector/noop"
+	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/models"
 	"github.com/semi-technologies/weaviate/entities/schema"
 	"github.com/semi-technologies/weaviate/entities/storagestate"
+	"github.com/semi-technologies/weaviate/usecases/monitoring"
 	"github.com/sirupsen/logrus"
 )
 
@@ -46,6 +48,7 @@ type Shard struct {
 	vectorIndex      VectorIndex
 	invertedRowCache *inverted.RowCacher
 	metrics          *Metrics
+	promMetrics      *monitoring.PrometheusMetrics
 	propertyIndices  propertyspecific.Indices
 	deletedDocIDs    *docid.InMemDeletedTracker
 	cleanupInterval  time.Duration
@@ -59,7 +62,10 @@ type Shard struct {
 	statusLock sync.Mutex
 }
 
-func NewShard(ctx context.Context, shardName string, index *Index) (*Shard, error) {
+func NewShard(ctx context.Context, promMetrics *monitoring.PrometheusMetrics,
+	shardName string, index *Index) (*Shard, error) {
+	before := time.Now()
+
 	rand, err := newBufferedRandomGen(64 * 1024)
 	if err != nil {
 		return nil, errors.Wrap(err, "init bufferend random generator")
@@ -71,14 +77,17 @@ func NewShard(ctx context.Context, shardName string, index *Index) (*Shard, erro
 		index:            index,
 		name:             shardName,
 		invertedRowCache: inverted.NewRowCacher(500 * 1024 * 1024),
-		metrics:          NewMetrics(index.logger),
-		deletedDocIDs:    docid.NewInMemDeletedTracker(),
+		promMetrics:      promMetrics,
+		metrics: NewMetrics(index.logger, promMetrics,
+			string(index.Config.ClassName), shardName),
+		deletedDocIDs: docid.NewInMemDeletedTracker(),
 		cleanupInterval: time.Duration(invertedIndexConfig.
 			CleanupIntervalSeconds) * time.Second,
 		cancel:        make(chan struct{}, 1),
 		randomSource:  rand,
 		diskScanState: newDiskScanState(),
 	}
+	defer s.metrics.ShardStartup(before)
 
 	hnswUserConfig, ok := index.vectorIndexUserConfig.(hnsw.UserConfig)
 	if !ok {
@@ -89,10 +98,26 @@ func NewShard(ctx context.Context, shardName string, index *Index) (*Shard, erro
 	if hnswUserConfig.Skip {
 		s.vectorIndex = noop.NewIndex()
 	} else {
+
+		var distProv distancer.Provider
+
+		switch hnswUserConfig.Distance {
+		case "", hnsw.DistanceCosine:
+			distProv = distancer.NewDotProductProvider()
+		case hnsw.DistanceL2Squared:
+			distProv = distancer.NewL2SquaredProvider()
+		default:
+			return nil, errors.Errorf("unrecognized distance metric %q,"+
+				"choose one of [\"cosine\", \"l2-squared\"]", hnswUserConfig.Distance)
+		}
+
 		vi, err := hnsw.New(hnsw.Config{
-			Logger:   index.logger,
-			RootPath: s.index.Config.RootPath,
-			ID:       s.ID(),
+			Logger:            index.logger,
+			RootPath:          s.index.Config.RootPath,
+			ID:                s.ID(),
+			ShardName:         s.name,
+			ClassName:         s.index.Config.ClassName.String(),
+			PrometheusMetrics: s.promMetrics,
 			MakeCommitLoggerThunk: func() (hnsw.CommitLogger, error) {
 				// Previously we had an interval of 10s in here, which was changed to
 				// 0.5s as part of gh-1867. There's really no way to wait so long in
@@ -111,7 +136,7 @@ func NewShard(ctx context.Context, shardName string, index *Index) (*Shard, erro
 					index.logger)
 			},
 			VectorForIDThunk: s.vectorByIndexID,
-			DistanceProvider: distancer.NewDotProductProvider(),
+			DistanceProvider: distProv,
 		}, hnswUserConfig)
 		if err != nil {
 			return nil, errors.Wrapf(err, "init shard %q: hnsw index", s.ID())
@@ -168,14 +193,21 @@ func (s *Shard) initDBFile(ctx context.Context) error {
 		"index": s.index.ID(),
 		"class": s.index.Config.ClassName,
 	})
-	store, err := lsmkv.New(s.DBPathLSM(), annotatedLogger)
+	var metrics *lsmkv.Metrics
+	if s.promMetrics != nil {
+		metrics = lsmkv.NewMetrics(s.promMetrics, string(s.index.Config.ClassName), s.name)
+	}
+
+	store, err := lsmkv.New(s.DBPathLSM(), annotatedLogger, metrics)
 	if err != nil {
 		return errors.Wrapf(err, "init lsmkv store at %s", s.DBPathLSM())
 	}
 
 	err = store.CreateOrLoadBucket(ctx, helpers.ObjectsBucketLSM,
 		lsmkv.WithStrategy(lsmkv.StrategyReplace),
-		lsmkv.WithSecondaryIndicies(1))
+		lsmkv.WithSecondaryIndicies(1),
+		lsmkv.WithMonitorCount(),
+	)
 	if err != nil {
 		return errors.Wrap(err, "create objects bucket")
 	}
@@ -245,14 +277,63 @@ func (s *Shard) addIDProperty(ctx context.Context) error {
 	}
 
 	err := s.store.CreateOrLoadBucket(ctx,
-		helpers.BucketFromPropNameLSM(helpers.PropertyNameID),
+		helpers.BucketFromPropNameLSM(filters.InternalPropID),
 		lsmkv.WithStrategy(lsmkv.StrategySetCollection))
 	if err != nil {
 		return err
 	}
 
 	err = s.store.CreateOrLoadBucket(ctx,
-		helpers.HashBucketFromPropNameLSM(helpers.PropertyNameID),
+		helpers.HashBucketFromPropNameLSM(filters.InternalPropID),
+		lsmkv.WithStrategy(lsmkv.StrategyReplace))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Shard) addTimestampProperties(ctx context.Context) error {
+	if s.isReadOnly() {
+		return storagestate.ErrStatusReadOnly
+	}
+
+	if err := s.addCreationTimeUnixProperty(ctx); err != nil {
+		return err
+	}
+	if err := s.addLastUpdateTimeUnixProperty(ctx); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Shard) addCreationTimeUnixProperty(ctx context.Context) error {
+	err := s.store.CreateOrLoadBucket(ctx,
+		helpers.BucketFromPropNameLSM(filters.InternalPropCreationTimeUnix),
+		lsmkv.WithStrategy(lsmkv.StrategySetCollection))
+	if err != nil {
+		return err
+	}
+	err = s.store.CreateOrLoadBucket(ctx,
+		helpers.HashBucketFromPropNameLSM(filters.InternalPropCreationTimeUnix),
+		lsmkv.WithStrategy(lsmkv.StrategyReplace))
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *Shard) addLastUpdateTimeUnixProperty(ctx context.Context) error {
+	err := s.store.CreateOrLoadBucket(ctx,
+		helpers.BucketFromPropNameLSM(filters.InternalPropLastUpdateTimeUnix),
+		lsmkv.WithStrategy(lsmkv.StrategySetCollection))
+	if err != nil {
+		return err
+	}
+	err = s.store.CreateOrLoadBucket(ctx,
+		helpers.HashBucketFromPropNameLSM(filters.InternalPropLastUpdateTimeUnix),
 		lsmkv.WithStrategy(lsmkv.StrategyReplace))
 	if err != nil {
 		return err
@@ -326,6 +407,17 @@ func (s *Shard) shutdown(ctx context.Context) error {
 	if err := s.propLengths.Close(); err != nil {
 		return errors.Wrap(err, "close prop length tracker")
 	}
+
+	// to ensure that all commitlog entries are written to disk.
+	// otherwise in some cases the tombstone cleanup process'
+	// 'RemoveTombstone' entry is not picked up on restarts
+	// resulting in perpetually attempting to remove a tombstone
+	// which doesn't actually exist anymore
+	if err := s.vectorIndex.Flush(); err != nil {
+		return errors.Wrap(err, "flush vector index commitlog")
+	}
+
+	s.vectorIndex.Shutdown()
 
 	return s.store.Shutdown(ctx)
 }

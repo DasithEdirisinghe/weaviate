@@ -54,27 +54,39 @@ func Test_Kinds_Authorization(t *testing.T) {
 		},
 		{
 			methodName:       "GetObject",
-			additionalArgs:   []interface{}{strfmt.UUID("foo"), additional.Properties{}},
+			additionalArgs:   []interface{}{"", strfmt.UUID("foo"), additional.Properties{}},
 			expectedVerb:     "get",
 			expectedResource: "objects/foo",
 		},
 		{
 			methodName:       "DeleteObject",
-			additionalArgs:   []interface{}{strfmt.UUID("foo")},
+			additionalArgs:   []interface{}{"class", strfmt.UUID("foo")},
+			expectedVerb:     "delete",
+			expectedResource: "objects/class/foo",
+		},
+		{ // deprecated by the one above
+			methodName:       "DeleteObject",
+			additionalArgs:   []interface{}{"", strfmt.UUID("foo")},
 			expectedVerb:     "delete",
 			expectedResource: "objects/foo",
 		},
 		{
 			methodName:       "UpdateObject",
-			additionalArgs:   []interface{}{strfmt.UUID("foo"), (*models.Object)(nil)},
+			additionalArgs:   []interface{}{"class", strfmt.UUID("foo"), (*models.Object)(nil)},
+			expectedVerb:     "update",
+			expectedResource: "objects/class/foo",
+		},
+		{ // deprecated by the one above
+			methodName:       "UpdateObject",
+			additionalArgs:   []interface{}{"", strfmt.UUID("foo"), (*models.Object)(nil)},
 			expectedVerb:     "update",
 			expectedResource: "objects/foo",
 		},
 		{
 			methodName:       "MergeObject",
-			additionalArgs:   []interface{}{strfmt.UUID("foo"), (*models.Object)(nil)},
+			additionalArgs:   []interface{}{&models.Object{Class: "class", ID: "foo"}},
 			expectedVerb:     "update",
-			expectedResource: "objects/foo",
+			expectedResource: "objects/class/foo",
 		},
 		{
 			methodName:       "GetObjectsClass",
@@ -84,25 +96,31 @@ func Test_Kinds_Authorization(t *testing.T) {
 		},
 		{
 			methodName:       "HeadObject",
-			additionalArgs:   []interface{}{strfmt.UUID("foo")},
+			additionalArgs:   []interface{}{"class", strfmt.UUID("foo")},
+			expectedVerb:     "head",
+			expectedResource: "objects/class/foo",
+		},
+		{ // deprecated by the one above
+			methodName:       "HeadObject",
+			additionalArgs:   []interface{}{"", strfmt.UUID("foo")},
 			expectedVerb:     "head",
 			expectedResource: "objects/foo",
 		},
 
-		// list kinds
+		// list objects
 		{
 			methodName:       "GetObjects",
-			additionalArgs:   []interface{}{(*int64)(nil), (*int64)(nil), additional.Properties{}},
+			additionalArgs:   []interface{}{(*int64)(nil), (*int64)(nil), (*string)(nil), (*string)(nil), additional.Properties{}},
 			expectedVerb:     "list",
 			expectedResource: "objects",
 		},
 
-		// reference on kinds
+		// reference on objects
 		{
 			methodName:       "AddObjectReference",
-			additionalArgs:   []interface{}{strfmt.UUID("foo"), "some prop", (*models.SingleRef)(nil)},
+			additionalArgs:   []interface{}{AddReferenceInput{Class: "class", ID: strfmt.UUID("foo"), Property: "some prop"}, (*models.SingleRef)(nil)},
 			expectedVerb:     "update",
-			expectedResource: "objects/foo",
+			expectedResource: "objects/class/foo",
 		},
 		{
 			methodName:       "DeleteObjectReference",
@@ -112,9 +130,9 @@ func Test_Kinds_Authorization(t *testing.T) {
 		},
 		{
 			methodName:       "UpdateObjectReferences",
-			additionalArgs:   []interface{}{strfmt.UUID("foo"), "some prop", (models.MultipleRef)(nil)},
+			additionalArgs:   []interface{}{&PutReferenceInput{Class: "class", ID: strfmt.UUID("foo"), Property: "some prop"}},
 			expectedVerb:     "update",
-			expectedResource: "objects/foo",
+			expectedResource: "objects/class/foo",
 		},
 	}
 
@@ -133,6 +151,9 @@ func Test_Kinds_Authorization(t *testing.T) {
 		principal := &models.Principal{}
 		logger, _ := test.NewNullLogger()
 		for _, test := range tests {
+			if test.methodName != "MergeObject" {
+				continue
+			}
 			t.Run(test.methodName, func(t *testing.T) {
 				schemaManager := &fakeSchemaManager{}
 				locks := &fakeLocks{}
@@ -148,8 +169,12 @@ func Test_Kinds_Authorization(t *testing.T) {
 				out, _ := callFuncByName(manager, test.methodName, args...)
 
 				require.Len(t, authorizer.calls, 1, "authorizer must be called")
-				assert.Equal(t, errors.New("just a test fake"), out[len(out)-1].Interface(),
-					"execution must abort with authorizer error")
+				aerr := out[len(out)-1].Interface().(error)
+				if err, ok := aerr.(*Error); !ok || !err.Forbidden() {
+					assert.Equal(t, errors.New("just a test fake"), aerr,
+						"execution must abort with authorizer error")
+				}
+
 				assert.Equal(t, authorizeCall{principal, test.expectedVerb, test.expectedResource},
 					authorizer.calls[0], "correct paramteres must have been used on authorizer")
 			})
@@ -186,6 +211,13 @@ func Test_BatchKinds_Authorization(t *testing.T) {
 			expectedVerb:     "update",
 			expectedResource: "batch/*",
 		},
+
+		{
+			methodName:       "DeleteObjects",
+			additionalArgs:   []interface{}{&models.BatchDeleteMatch{}, (*bool)(nil), (*string)(nil)},
+			expectedVerb:     "delete",
+			expectedResource: "batch/objects",
+		},
 	}
 
 	t.Run("verify that a test for every public method exists", func(t *testing.T) {
@@ -210,7 +242,7 @@ func Test_BatchKinds_Authorization(t *testing.T) {
 			vectorRepo := &fakeVectorRepo{}
 			vectorizer := &fakeVectorizer{}
 			vecProvider := &fakeVectorizerProvider{vectorizer}
-			manager := NewBatchManager(vectorRepo, vecProvider, locks, schemaManager, cfg, logger, authorizer)
+			manager := NewBatchManager(vectorRepo, vecProvider, locks, schemaManager, cfg, logger, authorizer, nil)
 
 			args := append([]interface{}{context.Background(), principal}, test.additionalArgs...)
 			out, _ := callFuncByName(manager, test.methodName, args...)

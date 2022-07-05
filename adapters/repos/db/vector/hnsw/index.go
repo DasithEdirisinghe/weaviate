@@ -28,7 +28,7 @@ import (
 
 type hnsw struct {
 	// global lock to prevent concurrent map read/write, etc.
-	sync.Mutex
+	sync.RWMutex
 
 	// certain operations related to deleting, such as finding a new entrypoint
 	// can only run sequentially, this separate lock helps assuring this without
@@ -36,6 +36,13 @@ type hnsw struct {
 	deleteLock *sync.Mutex
 
 	tombstoneLock *sync.RWMutex
+
+	// prevents tombstones cleanup to be performed in parallel with index reset operation
+	resetLock *sync.Mutex
+	// indicates whether reset operation occurred or not - if so tombstones cleanup method
+	// is aborted as it makes no sense anymore
+	resetCtx       context.Context
+	resetCtxCancel context.CancelFunc
 
 	// make sure the very first insert happens just once, otherwise we
 	// accidentally overwrite previous entrypoints on parallel imports on an
@@ -107,6 +114,8 @@ type hnsw struct {
 	pools *pools
 
 	forbidFlat bool // mostly used in testing scenarios where we want to use the index even in scenarios where we typically wouldn't
+
+	metrics *Metrics
 }
 
 type CommitLogger interface {
@@ -122,6 +131,7 @@ type CommitLogger interface {
 	Reset() error
 	Drop() error
 	Flush() error
+	Shutdown()
 }
 
 type BufferedLinksLogger interface {
@@ -162,6 +172,7 @@ func New(cfg Config, uc UserConfig) (*hnsw, error) {
 	vectorCache := newShardedLockCache(cfg.VectorForIDThunk, uc.VectorCacheMaxObjects,
 		cfg.Logger, normalizeOnRead)
 
+	resetCtx, resetCtxCancel := context.WithCancel(context.Background())
 	index := &hnsw{
 		maximumConnections: uc.MaxConnections,
 
@@ -184,6 +195,9 @@ func New(cfg Config, uc UserConfig) (*hnsw, error) {
 		cancel:            make(chan struct{}),
 		deleteLock:        &sync.Mutex{},
 		tombstoneLock:     &sync.RWMutex{},
+		resetLock:         &sync.Mutex{},
+		resetCtx:          resetCtx,
+		resetCtxCancel:    resetCtxCancel,
 		initialInsertOnce: &sync.Once{},
 		cleanupInterval:   time.Duration(uc.CleanupIntervalSeconds) * time.Second,
 
@@ -191,6 +205,8 @@ func New(cfg Config, uc UserConfig) (*hnsw, error) {
 		efMin:    int64(uc.DynamicEFMin),
 		efMax:    int64(uc.DynamicEFMax),
 		efFactor: int64(uc.DynamicEFFactor),
+
+		metrics: NewMetrics(cfg.PrometheusMetrics, cfg.ClassName, cfg.ShardName),
 	}
 
 	if err := index.init(cfg); err != nil {
@@ -493,21 +509,24 @@ func (h *hnsw) Stats() {
 }
 
 func (h *hnsw) isEmpty() bool {
-	h.Lock()
-	defer h.Unlock()
+	h.RLock()
+	defer h.RUnlock()
 
+	return h.isEmptyUnsecured()
+}
+
+func (h *hnsw) isEmptyUnsecured() bool {
 	for _, node := range h.nodes {
 		if node != nil {
 			return false
 		}
 	}
-
 	return true
 }
 
 func (h *hnsw) nodeByID(id uint64) *vertex {
-	h.Lock()
-	defer h.Unlock()
+	h.RLock()
+	defer h.RUnlock()
 
 	if id >= uint64(len(h.nodes)) {
 		// See https://github.com/semi-technologies/weaviate/issues/1838 for details.
@@ -538,13 +557,19 @@ func (h *hnsw) Drop() error {
 	return nil
 }
 
+func (h *hnsw) Shutdown() {
+	h.cancel <- struct{}{}
+	h.commitLog.Shutdown()
+	h.cache.drop()
+}
+
 func (h *hnsw) Flush() error {
 	return h.commitLog.Flush()
 }
 
 func (h *hnsw) Entrypoint() uint64 {
-	h.Lock()
-	defer h.Unlock()
+	h.RLock()
+	defer h.RUnlock()
 
 	return h.entryPointID
 }

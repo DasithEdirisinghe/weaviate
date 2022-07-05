@@ -25,7 +25,7 @@ import (
 	"github.com/semi-technologies/weaviate/entities/schema/crossref"
 	"github.com/semi-technologies/weaviate/usecases/auth/authorization/errors"
 	"github.com/semi-technologies/weaviate/usecases/config"
-	usecasesObjects "github.com/semi-technologies/weaviate/usecases/objects"
+	uco "github.com/semi-technologies/weaviate/usecases/objects"
 	"github.com/sirupsen/logrus"
 )
 
@@ -45,27 +45,28 @@ type ModulesProvider interface {
 type objectsManager interface {
 	AddObject(context.Context, *models.Principal, *models.Object) (*models.Object, error)
 	ValidateObject(context.Context, *models.Principal, *models.Object) error
-	GetObject(context.Context, *models.Principal, strfmt.UUID, additional.Properties) (*models.Object, error)
-	GetObjects(context.Context, *models.Principal, *int64, *int64, additional.Properties) ([]*models.Object, error)
-	UpdateObject(context.Context, *models.Principal, strfmt.UUID, *models.Object) (*models.Object, error)
-	MergeObject(context.Context, *models.Principal, strfmt.UUID, *models.Object) error
-	DeleteObject(context.Context, *models.Principal, strfmt.UUID) error
-	HeadObject(context.Context, *models.Principal, strfmt.UUID) (bool, error)
-	AddObjectReference(context.Context, *models.Principal, strfmt.UUID, string, *models.SingleRef) error
-	UpdateObjectReferences(context.Context, *models.Principal, strfmt.UUID, string, models.MultipleRef) error
-	DeleteObjectReference(context.Context, *models.Principal, strfmt.UUID, string, *models.SingleRef) error
+	GetObject(_ context.Context, _ *models.Principal, class string, _ strfmt.UUID, _ additional.Properties) (*models.Object, error)
+	DeleteObject(_ context.Context, _ *models.Principal, class string, _ strfmt.UUID) error
+	UpdateObject(_ context.Context, _ *models.Principal, class string, _ strfmt.UUID, _ *models.Object) (*models.Object, error)
+	HeadObject(_ context.Context, _ *models.Principal, class string, _ strfmt.UUID) (bool, *uco.Error)
+	GetObjects(context.Context, *models.Principal, *int64, *int64, *string, *string, additional.Properties) ([]*models.Object, error)
+	MergeObject(context.Context, *models.Principal, *models.Object) *uco.Error
+	AddObjectReference(context.Context, *models.Principal, *uco.AddReferenceInput) *uco.Error
+	UpdateObjectReferences(context.Context, *models.Principal, *uco.PutReferenceInput) *uco.Error
+	DeleteObjectReference(context.Context, *models.Principal, *uco.DeleteReferenceInput) *uco.Error
 	GetObjectsClass(ctx context.Context, principal *models.Principal, id strfmt.UUID) (*models.Class, error)
 }
 
 func (h *objectHandlers) addObject(params objects.ObjectsCreateParams,
-	principal *models.Principal) middleware.Responder {
+	principal *models.Principal,
+) middleware.Responder {
 	object, err := h.manager.AddObject(params.HTTPRequest.Context(), principal, params.Body)
 	if err != nil {
 		switch err.(type) {
 		case errors.Forbidden:
 			return objects.NewObjectsCreateForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrInvalidUserInput:
+		case uco.ErrInvalidUserInput:
 			return objects.NewObjectsCreateUnprocessableEntity().
 				WithPayload(errPayloadFromSingleErr(err))
 		default:
@@ -83,14 +84,15 @@ func (h *objectHandlers) addObject(params objects.ObjectsCreateParams,
 }
 
 func (h *objectHandlers) validateObject(params objects.ObjectsValidateParams,
-	principal *models.Principal) middleware.Responder {
+	principal *models.Principal,
+) middleware.Responder {
 	err := h.manager.ValidateObject(params.HTTPRequest.Context(), principal, params.Body)
 	if err != nil {
 		switch err.(type) {
 		case errors.Forbidden:
 			return objects.NewObjectsValidateForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrInvalidUserInput:
+		case uco.ErrInvalidUserInput:
 			return objects.NewObjectsValidateUnprocessableEntity().
 				WithPayload(errPayloadFromSingleErr(err))
 		default:
@@ -102,8 +104,10 @@ func (h *objectHandlers) validateObject(params objects.ObjectsValidateParams,
 	return objects.NewObjectsValidateOK()
 }
 
-func (h *objectHandlers) getObject(params objects.ObjectsGetParams,
-	principal *models.Principal) middleware.Responder {
+// getObject gets object of a specific class
+func (h *objectHandlers) getObject(params objects.ObjectsClassGetParams,
+	principal *models.Principal,
+) middleware.Responder {
 	var additional additional.Properties
 
 	// The process to extract additional params depends on knowing the schema
@@ -115,27 +119,27 @@ func (h *objectHandlers) getObject(params objects.ObjectsGetParams,
 	if params.Include != nil {
 		class, err := h.manager.GetObjectsClass(params.HTTPRequest.Context(), principal, params.ID)
 		if err != nil {
-			return objects.NewObjectsGetBadRequest().
+			return objects.NewObjectsClassGetBadRequest().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 
 		additional, err = parseIncludeParam(params.Include, h.modulesProvider, true, class)
 		if err != nil {
-			return objects.NewObjectsGetBadRequest().
+			return objects.NewObjectsClassGetBadRequest().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	object, err := h.manager.GetObject(params.HTTPRequest.Context(), principal, params.ID, additional)
+	object, err := h.manager.GetObject(params.HTTPRequest.Context(), principal, params.ClassName, params.ID, additional)
 	if err != nil {
 		switch err.(type) {
 		case errors.Forbidden:
-			return objects.NewObjectsGetForbidden().
+			return objects.NewObjectsClassGetForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound:
-			return objects.NewObjectsGetNotFound()
+		case uco.ErrNotFound:
+			return objects.NewObjectsClassGetNotFound()
 		default:
-			return objects.NewObjectsGetInternalServerError().
+			return objects.NewObjectsClassGetInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
@@ -145,11 +149,12 @@ func (h *objectHandlers) getObject(params objects.ObjectsGetParams,
 		object.Properties = h.extendPropertiesWithAPILinks(propertiesMap)
 	}
 
-	return objects.NewObjectsGetOK().WithPayload(object)
+	return objects.NewObjectsClassGetOK().WithPayload(object)
 }
 
 func (h *objectHandlers) getObjects(params objects.ObjectsListParams,
-	principal *models.Principal) middleware.Responder {
+	principal *models.Principal,
+) middleware.Responder {
 	additional, err := parseIncludeParam(params.Include, h.modulesProvider, h.shouldIncludeGetObjectsModuleParams(), nil)
 	if err != nil {
 		return objects.NewObjectsListBadRequest().
@@ -158,7 +163,8 @@ func (h *objectHandlers) getObjects(params objects.ObjectsListParams,
 
 	var deprecationsRes []*models.Deprecation
 
-	list, err := h.manager.GetObjects(params.HTTPRequest.Context(), principal, params.Offset, params.Limit, additional)
+	list, err := h.manager.GetObjects(params.HTTPRequest.Context(), principal,
+		params.Offset, params.Limit, params.Sort, params.Order, additional)
 	if err != nil {
 		switch err.(type) {
 		case errors.Forbidden:
@@ -185,19 +191,43 @@ func (h *objectHandlers) getObjects(params objects.ObjectsListParams,
 		})
 }
 
-func (h *objectHandlers) updateObject(params objects.ObjectsUpdateParams,
-	principal *models.Principal) middleware.Responder {
-	object, err := h.manager.UpdateObject(params.HTTPRequest.Context(), principal, params.ID, params.Body)
+// deleteObject delete a single object of giving class
+func (h *objectHandlers) deleteObject(params objects.ObjectsClassDeleteParams,
+	principal *models.Principal,
+) middleware.Responder {
+	err := h.manager.DeleteObject(params.HTTPRequest.Context(), principal, params.ClassName, params.ID)
 	if err != nil {
 		switch err.(type) {
 		case errors.Forbidden:
-			return objects.NewObjectsUpdateForbidden().
+			return objects.NewObjectsClassDeleteForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrInvalidUserInput:
-			return objects.NewObjectsUpdateUnprocessableEntity().
-				WithPayload(errPayloadFromSingleErr(err))
+		case uco.ErrNotFound:
+			return objects.NewObjectsClassDeleteNotFound()
 		default:
-			return objects.NewObjectsUpdateInternalServerError().
+			return objects.NewObjectsClassDeleteInternalServerError().
+				WithPayload(errPayloadFromSingleErr(err))
+		}
+	}
+
+	return objects.NewObjectsClassDeleteNoContent()
+}
+
+func (h *objectHandlers) updateObject(params objects.ObjectsClassPutParams,
+	principal *models.Principal,
+) middleware.Responder {
+	object, err := h.manager.UpdateObject(params.HTTPRequest.Context(), principal, params.ClassName, params.ID, params.Body)
+	if err != nil {
+		switch err.(type) {
+		case errors.Forbidden:
+			return objects.NewObjectsClassPutForbidden().
+				WithPayload(errPayloadFromSingleErr(err))
+		case uco.ErrInvalidUserInput:
+			return objects.NewObjectsClassPutUnprocessableEntity().
+				WithPayload(errPayloadFromSingleErr(err))
+		case uco.ErrNotFound:
+			return objects.NewObjectsClassDeleteNotFound()
+		default:
+			return objects.NewObjectsClassPutInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
@@ -207,156 +237,277 @@ func (h *objectHandlers) updateObject(params objects.ObjectsUpdateParams,
 		object.Properties = h.extendPropertiesWithAPILinks(propertiesMap)
 	}
 
-	return objects.NewObjectsUpdateOK().WithPayload(object)
+	return objects.NewObjectsClassPutOK().WithPayload(object)
 }
 
-func (h *objectHandlers) deleteObject(params objects.ObjectsDeleteParams,
-	principal *models.Principal) middleware.Responder {
-	err := h.manager.DeleteObject(params.HTTPRequest.Context(), principal, params.ID)
+func (h *objectHandlers) headObject(r objects.ObjectsClassHeadParams,
+	principal *models.Principal,
+) middleware.Responder {
+	ok, err := h.manager.HeadObject(r.HTTPRequest.Context(), principal, r.ClassName, r.ID)
 	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsDeleteForbidden().
+		switch {
+		case err.Forbidden():
+			return objects.NewObjectsClassHeadForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound:
-			return objects.NewObjectsDeleteNotFound()
 		default:
-			return objects.NewObjectsDeleteInternalServerError().
+			return objects.NewObjectsClassHeadInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	return objects.NewObjectsDeleteNoContent()
+	if !ok {
+		return objects.NewObjectsClassHeadNotFound()
+	}
+	return objects.NewObjectsClassHeadNoContent()
 }
 
-func (h *objectHandlers) headObject(params objects.ObjectsHeadParams,
-	principal *models.Principal) middleware.Responder {
-	exists, err := h.manager.HeadObject(params.HTTPRequest.Context(), principal, params.ID)
+func (h *objectHandlers) patchObject(params objects.ObjectsClassPatchParams, principal *models.Principal) middleware.Responder {
+	updates := params.Body
+	updates.ID = params.ID
+	updates.Class = params.ClassName
+	err := h.manager.MergeObject(params.HTTPRequest.Context(), principal, updates)
 	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsHeadForbidden().
+		switch {
+		case err.NotFound():
+			return objects.NewObjectsClassPatchNotFound()
+		case err.Forbidden():
+			return objects.NewObjectsClassPatchForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound:
-			return objects.NewObjectsHeadNotFound()
+		case err.BadRequest():
+			return objects.NewObjectsClassPatchUnprocessableEntity().
+				WithPayload(errPayloadFromSingleErr(err))
 		default:
-			return objects.NewObjectsHeadInternalServerError().
+			return objects.NewObjectsClassPatchInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	if exists {
-		return objects.NewObjectsHeadNoContent()
-	}
-	return objects.NewObjectsHeadNotFound()
+	return objects.NewObjectsClassPatchNoContent()
 }
 
-func (h *objectHandlers) patchObject(params objects.ObjectsPatchParams, principal *models.Principal) middleware.Responder {
-	err := h.manager.MergeObject(params.HTTPRequest.Context(), principal, params.ID, params.Body)
+func (h *objectHandlers) addObjectReference(
+	params objects.ObjectsClassReferencesCreateParams,
+	principal *models.Principal,
+) middleware.Responder {
+	input := uco.AddReferenceInput{
+		Class:    params.ClassName,
+		ID:       params.ID,
+		Property: params.PropertyName,
+		Ref:      *params.Body,
+	}
+	err := h.manager.AddObjectReference(params.HTTPRequest.Context(), principal, &input)
 	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsPatchForbidden().
+		switch {
+		case err.Forbidden():
+			return objects.NewObjectsClassReferencesCreateForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrInvalidUserInput:
-			return objects.NewObjectsUpdateUnprocessableEntity().
+		case err.NotFound():
+			return objects.NewObjectsClassReferencesCreateNotFound()
+		case err.BadRequest():
+			return objects.NewObjectsClassReferencesCreateUnprocessableEntity().
 				WithPayload(errPayloadFromSingleErr(err))
 		default:
-			return objects.NewObjectsUpdateInternalServerError().
+			return objects.NewObjectsClassReferencesCreateInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	return objects.NewObjectsPatchNoContent()
+	return objects.NewObjectsClassReferencesCreateOK()
 }
 
-func (h *objectHandlers) addObjectReference(params objects.ObjectsReferencesCreateParams,
-	principal *models.Principal) middleware.Responder {
-	err := h.manager.AddObjectReference(params.HTTPRequest.Context(), principal, params.ID, params.PropertyName, params.Body)
+func (h *objectHandlers) putObjectReferences(params objects.ObjectsClassReferencesPutParams,
+	principal *models.Principal,
+) middleware.Responder {
+	input := uco.PutReferenceInput{
+		Class:    params.ClassName,
+		ID:       params.ID,
+		Property: params.PropertyName,
+		Refs:     params.Body,
+	}
+	err := h.manager.UpdateObjectReferences(params.HTTPRequest.Context(), principal, &input)
 	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsReferencesCreateForbidden().
+		switch {
+		case err.Forbidden():
+			return objects.NewObjectsClassReferencesPutForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound, usecasesObjects.ErrInvalidUserInput:
-			return objects.NewObjectsReferencesCreateUnprocessableEntity().
+		case err.NotFound():
+			return objects.NewObjectsClassReferencesPutNotFound()
+		case err.BadRequest():
+			return objects.NewObjectsClassReferencesPutUnprocessableEntity().
 				WithPayload(errPayloadFromSingleErr(err))
 		default:
-			return objects.NewObjectsReferencesCreateInternalServerError().
+			return objects.NewObjectsClassReferencesPutInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	return objects.NewObjectsReferencesCreateOK()
+	return objects.NewObjectsClassReferencesPutOK()
 }
 
-func (h *objectHandlers) updateObjectReferences(params objects.ObjectsReferencesUpdateParams,
-	principal *models.Principal) middleware.Responder {
-	err := h.manager.UpdateObjectReferences(params.HTTPRequest.Context(), principal, params.ID, params.PropertyName, params.Body)
+func (h *objectHandlers) deleteObjectReference(params objects.ObjectsClassReferencesDeleteParams,
+	principal *models.Principal,
+) middleware.Responder {
+	input := uco.DeleteReferenceInput{
+		Class:     params.ClassName,
+		ID:        params.ID,
+		Property:  params.PropertyName,
+		Reference: *params.Body,
+	}
+	err := h.manager.DeleteObjectReference(params.HTTPRequest.Context(), principal, &input)
 	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsReferencesUpdateForbidden().
+		switch err.Code {
+		case uco.StatusForbidden:
+			return objects.NewObjectsClassReferencesDeleteForbidden().
 				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound, usecasesObjects.ErrInvalidUserInput:
-			return objects.NewObjectsReferencesUpdateUnprocessableEntity().
+		case uco.StatusNotFound:
+			return objects.NewObjectsClassReferencesDeleteNotFound()
+		case uco.StatusBadRequest:
+			return objects.NewObjectsClassReferencesDeleteUnprocessableEntity().
 				WithPayload(errPayloadFromSingleErr(err))
 		default:
-			return objects.NewObjectsReferencesUpdateInternalServerError().
+			return objects.NewObjectsClassReferencesDeleteInternalServerError().
 				WithPayload(errPayloadFromSingleErr(err))
 		}
 	}
 
-	return objects.NewObjectsReferencesUpdateOK()
-}
-
-func (h *objectHandlers) deleteObjectReference(params objects.ObjectsReferencesDeleteParams,
-	principal *models.Principal) middleware.Responder {
-	err := h.manager.DeleteObjectReference(params.HTTPRequest.Context(), principal, params.ID, params.PropertyName, params.Body)
-	if err != nil {
-		switch err.(type) {
-		case errors.Forbidden:
-			return objects.NewObjectsReferencesDeleteForbidden().
-				WithPayload(errPayloadFromSingleErr(err))
-		case usecasesObjects.ErrNotFound, usecasesObjects.ErrInvalidUserInput:
-			return objects.NewObjectsReferencesDeleteNotFound().
-				WithPayload(errPayloadFromSingleErr(err))
-		default:
-			return objects.NewObjectsReferencesDeleteInternalServerError().
-				WithPayload(errPayloadFromSingleErr(err))
-		}
-	}
-
-	return objects.NewObjectsReferencesDeleteNoContent()
+	return objects.NewObjectsClassReferencesDeleteNoContent()
 }
 
 func setupObjectHandlers(api *operations.WeaviateAPI,
-	manager *usecasesObjects.Manager, config config.Config, logger logrus.FieldLogger,
-	modulesProvider ModulesProvider) {
+	manager *uco.Manager, config config.Config, logger logrus.FieldLogger,
+	modulesProvider ModulesProvider,
+) {
 	h := &objectHandlers{manager, logger, config, modulesProvider}
-
 	api.ObjectsObjectsCreateHandler = objects.
 		ObjectsCreateHandlerFunc(h.addObject)
 	api.ObjectsObjectsValidateHandler = objects.
 		ObjectsValidateHandlerFunc(h.validateObject)
-	api.ObjectsObjectsGetHandler = objects.
-		ObjectsGetHandlerFunc(h.getObject)
-	api.ObjectsObjectsDeleteHandler = objects.
-		ObjectsDeleteHandlerFunc(h.deleteObject)
-	api.ObjectsObjectsHeadHandler = objects.
-		ObjectsHeadHandlerFunc(h.headObject)
+	api.ObjectsObjectsClassGetHandler = objects.
+		ObjectsClassGetHandlerFunc(h.getObject)
+	api.ObjectsObjectsClassHeadHandler = objects.
+		ObjectsClassHeadHandlerFunc(h.headObject)
+	api.ObjectsObjectsClassDeleteHandler = objects.
+		ObjectsClassDeleteHandlerFunc(h.deleteObject)
 	api.ObjectsObjectsListHandler = objects.
 		ObjectsListHandlerFunc(h.getObjects)
+	api.ObjectsObjectsClassPutHandler = objects.
+		ObjectsClassPutHandlerFunc(h.updateObject)
+	api.ObjectsObjectsClassPatchHandler = objects.
+		ObjectsClassPatchHandlerFunc(h.patchObject)
+	api.ObjectsObjectsClassReferencesCreateHandler = objects.
+		ObjectsClassReferencesCreateHandlerFunc(h.addObjectReference)
+	api.ObjectsObjectsClassReferencesDeleteHandler = objects.
+		ObjectsClassReferencesDeleteHandlerFunc(h.deleteObjectReference)
+	api.ObjectsObjectsClassReferencesPutHandler = objects.
+		ObjectsClassReferencesPutHandlerFunc(h.putObjectReferences)
+	// deprecated handlers
+	api.ObjectsObjectsGetHandler = objects.
+		ObjectsGetHandlerFunc(h.getObjectDeprecated)
+	api.ObjectsObjectsDeleteHandler = objects.
+		ObjectsDeleteHandlerFunc(h.deleteObjectDeprecated)
+	api.ObjectsObjectsHeadHandler = objects.
+		ObjectsHeadHandlerFunc(h.headObjectDeprecated)
 	api.ObjectsObjectsUpdateHandler = objects.
-		ObjectsUpdateHandlerFunc(h.updateObject)
+		ObjectsUpdateHandlerFunc(h.updateObjectDeprecated)
 	api.ObjectsObjectsPatchHandler = objects.
-		ObjectsPatchHandlerFunc(h.patchObject)
+		ObjectsPatchHandlerFunc(h.patchObjectDeprecated)
 	api.ObjectsObjectsReferencesCreateHandler = objects.
-		ObjectsReferencesCreateHandlerFunc(h.addObjectReference)
-	api.ObjectsObjectsReferencesDeleteHandler = objects.
-		ObjectsReferencesDeleteHandlerFunc(h.deleteObjectReference)
+		ObjectsReferencesCreateHandlerFunc(h.addObjectReferenceDeprecated)
 	api.ObjectsObjectsReferencesUpdateHandler = objects.
-		ObjectsReferencesUpdateHandlerFunc(h.updateObjectReferences)
+		ObjectsReferencesUpdateHandlerFunc(h.updateObjectReferencesDeprecated)
+	api.ObjectsObjectsReferencesDeleteHandler = objects.
+		ObjectsReferencesDeleteHandlerFunc(h.deleteObjectReferenceDeprecated)
+}
+
+func (h *objectHandlers) getObjectDeprecated(params objects.ObjectsGetParams,
+	principal *models.Principal,
+) middleware.Responder {
+	ps := objects.ObjectsClassGetParams{
+		HTTPRequest: params.HTTPRequest,
+		ID:          params.ID,
+		Include:     params.Include,
+	}
+	return h.getObject(ps, principal)
+}
+
+func (h *objectHandlers) headObjectDeprecated(params objects.ObjectsHeadParams,
+	principal *models.Principal,
+) middleware.Responder {
+	r := objects.ObjectsClassHeadParams{
+		HTTPRequest: params.HTTPRequest,
+		ID:          params.ID,
+	}
+	return h.headObject(r, principal)
+}
+
+func (h *objectHandlers) patchObjectDeprecated(params objects.ObjectsPatchParams, principal *models.Principal) middleware.Responder {
+	args := objects.ObjectsClassPatchParams{
+		HTTPRequest: params.HTTPRequest,
+		ID:          params.ID,
+		Body:        params.Body,
+	}
+	if params.Body != nil {
+		args.ClassName = params.Body.Class
+	}
+	return h.patchObject(args, principal)
+}
+
+func (h *objectHandlers) updateObjectDeprecated(params objects.ObjectsUpdateParams,
+	principal *models.Principal,
+) middleware.Responder {
+	ps := objects.ObjectsClassPutParams{
+		HTTPRequest: params.HTTPRequest,
+		ClassName:   params.Body.Class,
+		Body:        params.Body,
+		ID:          params.ID,
+	}
+	return h.updateObject(ps, principal)
+}
+
+func (h *objectHandlers) deleteObjectDeprecated(params objects.ObjectsDeleteParams,
+	principal *models.Principal,
+) middleware.Responder {
+	ps := objects.ObjectsClassDeleteParams{
+		HTTPRequest: params.HTTPRequest,
+		ID:          params.ID,
+	}
+	return h.deleteObject(ps, principal)
+}
+
+func (h *objectHandlers) addObjectReferenceDeprecated(params objects.ObjectsReferencesCreateParams,
+	principal *models.Principal,
+) middleware.Responder {
+	req := objects.ObjectsClassReferencesCreateParams{
+		HTTPRequest:  params.HTTPRequest,
+		Body:         params.Body,
+		ID:           params.ID,
+		PropertyName: params.PropertyName,
+	}
+	return h.addObjectReference(req, principal)
+}
+
+func (h *objectHandlers) updateObjectReferencesDeprecated(params objects.ObjectsReferencesUpdateParams,
+	principal *models.Principal,
+) middleware.Responder {
+	req := objects.ObjectsClassReferencesPutParams{
+		HTTPRequest:  params.HTTPRequest,
+		ID:           params.ID,
+		PropertyName: params.PropertyName,
+		Body:         params.Body,
+	}
+	return h.putObjectReferences(req, principal)
+}
+
+func (h *objectHandlers) deleteObjectReferenceDeprecated(params objects.ObjectsReferencesDeleteParams,
+	principal *models.Principal,
+) middleware.Responder {
+	req := objects.ObjectsClassReferencesDeleteParams{
+		HTTPRequest:  params.HTTPRequest,
+		Body:         params.Body,
+		ID:           params.ID,
+		PropertyName: params.PropertyName,
+	}
+	return h.deleteObjectReference(req, principal)
 }
 
 func (h *objectHandlers) extendPropertiesWithAPILinks(schema map[string]interface{}) map[string]interface{} {
@@ -402,7 +553,8 @@ func (h *objectHandlers) shouldIncludeGetObjectsModuleParams() bool {
 }
 
 func parseIncludeParam(in *string, modulesProvider ModulesProvider, includeModuleParams bool,
-	class *models.Class) (additional.Properties, error) {
+	class *models.Class,
+) (additional.Properties, error) {
 	out := additional.Properties{}
 	if in == nil {
 		return out, nil

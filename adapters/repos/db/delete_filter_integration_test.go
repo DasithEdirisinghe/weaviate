@@ -71,12 +71,12 @@ func Test_FilterSearchesOnDeletedDocIDsWithLimits(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
 	migrator := NewMigrator(repo, logger)
+	defer repo.Shutdown(testCtx())
 
 	t.Run("creating the thing class", func(t *testing.T) {
 		require.Nil(t,
@@ -191,11 +191,11 @@ func TestLimitOneAfterDeletion(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
+	defer repo.Shutdown(testCtx())
 	migrator := NewMigrator(repo, logger)
 
 	t.Run("creating the class", func(t *testing.T) {

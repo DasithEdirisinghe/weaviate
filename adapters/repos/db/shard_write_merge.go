@@ -82,7 +82,7 @@ func (s *Shard) mergeObjectInStorage(merge objects.MergeDocument,
 	}
 
 	if err := s.updateInvertedIndexLSM(nextObj, status, previous); err != nil {
-		return nil, status, errors.Wrap(err, "udpate inverted indices")
+		return nil, status, errors.Wrap(err, "update inverted indices")
 	}
 
 	return nextObj, status, nil
@@ -204,6 +204,7 @@ func mergeProps(previous *storobj.Object,
 		next.Vector = merge.Vector
 	}
 
+	next.Object.LastUpdateTimeUnix = merge.UpdateTime
 	next.SetProperties(properties)
 
 	return next

@@ -46,15 +46,30 @@ func Test_Batch(t *testing.T) {
 				},
 			},
 		})
+		createObjectClass(t, &models.Class{
+			Class: "BulkTestTarget",
+			Properties: []*models.Property{
+				{
+					Name:     "intProp",
+					DataType: []string{"int"},
+				},
+				{
+					Name:     "fromSource",
+					DataType: []string{"BulkTestSource"},
+				},
+			},
+		})
 	})
 
 	time.Sleep(2000 * time.Millisecond)
 
 	t.Run("gql results order", batchJourney)
 	t.Run("gql results order", gqlResultsOrder)
+	t.Run("batch delete", batchDeleteJourney)
 
 	deleteObjectClass(t, "BulkTest")
 	deleteObjectClass(t, "BulkTestSource")
+	deleteObjectClass(t, "BulkTestTarget")
 }
 
 func createObjectClass(t *testing.T, class *models.Class) {

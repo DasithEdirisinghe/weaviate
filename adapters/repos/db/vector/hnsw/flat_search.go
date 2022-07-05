@@ -21,13 +21,22 @@ func (h *hnsw) flatSearch(queryVector []float32, limit int,
 	results := priorityqueue.NewMax(limit)
 
 	for candidate := range allowList {
-		h.Lock()
-		c := h.nodes[candidate]
-		if c == nil || h.hasTombstone(candidate) {
-			h.Unlock()
+		h.RLock()
+		// Hot fix for https://github.com/semi-technologies/weaviate/issues/1937
+		// this if statement mitigates the problem but it doesn't resolve the issue
+		if candidate >= uint64(len(h.nodes)) {
+			h.logger.WithField("action", "flatSearch").
+				Warnf("trying to get candidate: %v but we only have: %v elements.",
+					candidate, len(h.nodes))
+			h.RUnlock()
 			continue
 		}
-		h.Unlock()
+		c := h.nodes[candidate]
+		if c == nil || h.hasTombstone(candidate) {
+			h.RUnlock()
+			continue
+		}
+		h.RUnlock()
 		dist, ok, err := h.distBetweenNodeAndVec(candidate, queryVector)
 		if err != nil {
 			return nil, nil, err

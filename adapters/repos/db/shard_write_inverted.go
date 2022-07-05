@@ -15,24 +15,36 @@ import (
 	"fmt"
 
 	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted"
+	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/schema"
 	"github.com/semi-technologies/weaviate/entities/storobj"
 )
 
 func (s *Shard) analyzeObject(object *storobj.Object) ([]inverted.Property, error) {
-	if object.Properties() == nil {
-		return nil, nil
-	}
-
 	schemaModel := s.index.getSchema.GetSchemaSkipAuth().Objects
 	c, err := schema.GetClassByName(schemaModel, object.Class().String())
 	if err != nil {
 		return nil, err
 	}
 
-	schemaMap, ok := object.Properties().(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("expected schema to be map, but got %T", object.Properties())
+	var schemaMap map[string]interface{}
+
+	if object.Properties() == nil {
+		schemaMap = make(map[string]interface{})
+	} else {
+		maybeSchemaMap, ok := object.Properties().(map[string]interface{})
+		if !ok {
+			return nil, fmt.Errorf("expected schema to be map, but got %T", object.Properties())
+		}
+		schemaMap = maybeSchemaMap
+	}
+
+	if s.index.invertedIndexConfig.IndexTimestamps {
+		if schemaMap == nil {
+			schemaMap = make(map[string]interface{})
+		}
+		schemaMap[filters.InternalPropCreationTimeUnix] = object.Object.CreationTimeUnix
+		schemaMap[filters.InternalPropLastUpdateTimeUnix] = object.Object.LastUpdateTimeUnix
 	}
 
 	return inverted.NewAnalyzer(s.index.stopwords).Object(schemaMap, c.Properties, object.ID())

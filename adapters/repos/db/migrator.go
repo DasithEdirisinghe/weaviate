@@ -43,7 +43,8 @@ func (m *Migrator) AddClass(ctx context.Context, class *models.Class,
 		// always have the field set
 		inverted.ConfigFromModel(class.InvertedIndexConfig),
 		class.VectorIndexConfig.(schema.VectorIndexConfig),
-		m.db.schemaGetter, m.db, m.logger, m.db.nodeResolver, m.db.remoteClient)
+		m.db.schemaGetter, m.db, m.logger, m.db.nodeResolver, m.db.remoteClient,
+		m.db.promMetrics)
 	if err != nil {
 		return errors.Wrap(err, "create index")
 	}
@@ -51,6 +52,13 @@ func (m *Migrator) AddClass(ctx context.Context, class *models.Class,
 	err = idx.addUUIDProperty(ctx)
 	if err != nil {
 		return errors.Wrapf(err, "extend idx '%s' with uuid property", idx.ID())
+	}
+
+	if class.InvertedIndexConfig.IndexTimestamps {
+		err = idx.addTimestampProperties(ctx)
+		if err != nil {
+			return errors.Wrapf(err, "extend idx '%s' with timestamp properties", idx.ID())
+		}
 	}
 
 	for _, prop := range class.Properties {

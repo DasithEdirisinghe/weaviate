@@ -212,6 +212,7 @@ func buildGetClassField(classObject *graphql.Object,
 				Type:        graphql.Int,
 			},
 
+			"sort":       sortArgument(class.Class),
 			"nearVector": nearVectorArgument(class.Class),
 			"nearObject": nearObjectArgument(class.Class),
 			"where":      whereArgument(class.Class),
@@ -323,6 +324,11 @@ func (r *resolver) makeResolveGetClass(className string) graphql.FieldResolveFn 
 			return nil, err
 		}
 
+		var sort []filters.Sort
+		if sortArg, ok := p.Args["sort"]; ok {
+			sort = filters.ExtractSortFromArgs(sortArg.([]interface{}))
+		}
+
 		filters, err := common_filters.ExtractFilters(p.Args, p.Info.FieldName)
 		if err != nil {
 			return nil, fmt.Errorf("could not extract filters: %s", err)
@@ -330,13 +336,19 @@ func (r *resolver) makeResolveGetClass(className string) graphql.FieldResolveFn 
 
 		var nearVectorParams *searchparams.NearVector
 		if nearVector, ok := p.Args["nearVector"]; ok {
-			p := common_filters.ExtractNearVector(nearVector.(map[string]interface{}))
+			p, err := common_filters.ExtractNearVector(nearVector.(map[string]interface{}))
+			if err != nil {
+				return nil, fmt.Errorf("failed to extract nearVector params: %s", err)
+			}
 			nearVectorParams = &p
 		}
 
 		var nearObjectParams *searchparams.NearObject
 		if nearObject, ok := p.Args["nearObject"]; ok {
-			p := common_filters.ExtractNearObject(nearObject.(map[string]interface{}))
+			p, err := common_filters.ExtractNearObject(nearObject.(map[string]interface{}))
+			if err != nil {
+				return nil, fmt.Errorf("failed to extract nearObject params: %s", err)
+			}
 			nearObjectParams = &p
 		}
 
@@ -361,6 +373,7 @@ func (r *resolver) makeResolveGetClass(className string) graphql.FieldResolveFn 
 			ClassName:            className,
 			Pagination:           pagination,
 			Properties:           properties,
+			Sort:                 sort,
 			NearVector:           nearVectorParams,
 			NearObject:           nearObjectParams,
 			Group:                group,
@@ -399,19 +412,21 @@ func setLimitBasedOnVectorSearchParams(params *traverser.GetParams) {
 		}
 	}
 
-	if params.NearVector != nil && params.NearVector.Certainty != 0 {
+	if params.NearVector != nil &&
+		(params.NearVector.Certainty != 0 || params.NearVector.Distance != 0) {
 		setLimit(params)
 		return
 	}
 
-	if params.NearObject != nil && params.NearObject.Certainty != 0 {
+	if params.NearObject != nil &&
+		(params.NearObject.Certainty != 0 || params.NearObject.Distance != 0) {
 		setLimit(params)
 		return
 	}
 
 	for _, param := range params.ModuleParams {
 		nearParam, ok := param.(modulecapabilities.NearParam)
-		if ok && nearParam.GetCertainty() != 0 {
+		if ok && nearParam.SimilarityMetricProvided() {
 			setLimit(params)
 			return
 		}
@@ -466,7 +481,8 @@ type additionalCheck struct {
 }
 
 func (ac *additionalCheck) isAdditional(name string) bool {
-	if name == "classification" || name == "certainty" || name == "id" || name == "vector" ||
+	if name == "classification" || name == "certainty" ||
+		name == "distance" || name == "id" || name == "vector" ||
 		name == "creationTimeUnix" || name == "lastUpdateTimeUnix" {
 		return true
 	}
@@ -536,6 +552,12 @@ func extractProperties(className string, selections *ast.SelectionSet,
 							additionalProps.Certainty = true
 							continue
 						}
+
+						if additionalProperty == "distance" {
+							additionalProps.Distance = true
+							continue
+						}
+
 						if additionalProperty == "id" {
 							additionalProps.ID = true
 							continue

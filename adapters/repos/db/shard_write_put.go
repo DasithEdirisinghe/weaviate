@@ -15,12 +15,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/helpers"
+	"github.com/semi-technologies/weaviate/adapters/repos/db/inverted"
 	"github.com/semi-technologies/weaviate/adapters/repos/db/lsmkv"
+	"github.com/semi-technologies/weaviate/entities/filters"
 	"github.com/semi-technologies/weaviate/entities/storagestate"
 	"github.com/semi-technologies/weaviate/entities/storobj"
 )
@@ -42,12 +45,8 @@ func (s *Shard) putObject(ctx context.Context, object *storobj.Object) error {
 		return errors.Wrap(err, "store object in LSM store")
 	}
 
-	// vector is now optional as of
-	// https://github.com/semi-technologies/weaviate/issues/1800
-	if object.Vector != nil {
-		if err := s.updateVectorIndex(object.Vector, status); err != nil {
-			return errors.Wrap(err, "update vector index")
-		}
+	if err := s.updateVectorIndex(object.Vector, status); err != nil {
+		return errors.Wrap(err, "update vector index")
 	}
 
 	if err := s.updatePropertySpecificIndices(object, status); err != nil {
@@ -71,10 +70,20 @@ func (s *Shard) putObject(ctx context.Context, object *storobj.Object) error {
 
 func (s *Shard) updateVectorIndex(vector []float32,
 	status objectInsertStatus) error {
+	// even if no vector is provided in an update, we still need
+	// to delete the previous vector from the index, if it
+	// exists. otherwise, the associated doc id is left dangling,
+	// resulting in failed attempts to merge an object on restarts.
 	if status.docIDChanged {
 		if err := s.vectorIndex.Delete(status.oldDocID); err != nil {
 			return errors.Wrapf(err, "delete doc id %d from vector index", status.oldDocID)
 		}
+	}
+
+	// vector is now optional as of
+	// https://github.com/semi-technologies/weaviate/issues/1800
+	if len(vector) == 0 {
+		return nil
 	}
 
 	if err := s.vectorIndex.Add(status.docID, vector); err != nil {
@@ -99,6 +108,7 @@ func (s *Shard) putObjectLSM(object *storobj.Object,
 	if err != nil {
 		return status, errors.Wrap(err, "check insert/update status")
 	}
+	s.metrics.PutObjectDetermineStatus(before)
 
 	object.SetDocID(status.docID)
 	data, err := object.MarshalBinary()
@@ -130,8 +140,8 @@ type objectInsertStatus struct {
 }
 
 // to be called with the current contents of a row, if the row is empty (i.e.
-// didn't exist before, we will get a new docID from the central counter.
-// Otherwise, we will will reuse the previous docID and mark this as an update
+// didn't exist before), we will get a new docID from the central counter.
+// Otherwise, we will reuse the previous docID and mark this as an update
 func (s *Shard) determineInsertStatus(previous []byte,
 	next *storobj.Object) (objectInsertStatus, error) {
 	var out objectInsertStatus
@@ -213,7 +223,16 @@ func (s *Shard) updateInvertedIndexLSM(object *storobj.Object,
 		return errors.Wrap(err, "analyze and cleanup previous")
 	}
 
+	if s.index.invertedIndexConfig.IndexTimestamps {
+		// update the inverted timestamp indices as well
+		err = s.addIndexedTimestampsToProps(object, &props)
+		if err != nil {
+			return errors.Wrap(err, "add indexed timestamps to props")
+		}
+	}
+
 	before := time.Now()
+
 	err = s.extendInvertedIndicesLSM(props, status.docID)
 	if err != nil {
 		return errors.Wrap(err, "put inverted indices props")
@@ -223,6 +242,33 @@ func (s *Shard) updateInvertedIndexLSM(object *storobj.Object,
 	if err := s.addPropLengths(props); err != nil {
 		return errors.Wrap(err, "store field length values for props")
 	}
+
+	return nil
+}
+
+// addIndexedTimestampsToProps ensures that writes are indexed
+// by internal timestamps
+func (s *Shard) addIndexedTimestampsToProps(object *storobj.Object, props *[]inverted.Property) error {
+	createTime, err := json.Marshal(object.CreationTimeUnix())
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal _creationTimeUnix")
+	}
+
+	updateTime, err := json.Marshal(object.LastUpdateTimeUnix())
+	if err != nil {
+		return errors.Wrap(err, "failed to marshal _lastUpdateTimeUnix")
+	}
+
+	*props = append(*props,
+		inverted.Property{
+			Name:  filters.InternalPropCreationTimeUnix,
+			Items: []inverted.Countable{{Data: createTime}},
+		},
+		inverted.Property{
+			Name:  filters.InternalPropLastUpdateTimeUnix,
+			Items: []inverted.Countable{{Data: updateTime}},
+		},
+	)
 
 	return nil
 }

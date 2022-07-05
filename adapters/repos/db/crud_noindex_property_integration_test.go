@@ -67,8 +67,7 @@ func TestCRUD_NoIndexProp(t *testing.T) {
 		QueryMaximumResults:       10000,
 		DiskUseWarningPercentage:  config.DefaultDiskUseWarningPercentage,
 		DiskUseReadOnlyPercentage: config.DefaultDiskUseReadonlyPercentage,
-	}, &fakeRemoteClient{},
-		&fakeNodeResolver{})
+	}, &fakeRemoteClient{}, &fakeNodeResolver{}, nil)
 	repo.SetSchemaGetter(schemaGetter)
 	err := repo.WaitForStartup(testCtx())
 	require.Nil(t, err)
@@ -130,6 +129,21 @@ func TestCRUD_NoIndexProp(t *testing.T) {
 		require.NotNil(t, err)
 		assert.Contains(t, err.Error(),
 			"bucket for prop hiddenStringProp not found - is it indexed?")
+	})
+
+	t.Run("class search on timestamp prop with no timestamp indexing error", func(t *testing.T) {
+		_, err := repo.ClassSearch(context.Background(), traverser.GetParams{
+			ClassName: "ThingClassWithNoIndexProps",
+			Pagination: &filters.Pagination{
+				Limit: 10,
+			},
+			Filters: buildFilter("_creationTimeUnix", "1234567891011", eq, dtString),
+		})
+
+		require.NotNil(t, err)
+		assert.Contains(t, err.Error(),
+			"timestamps must be indexed to be filterable! "+
+				"add `indexTimestaps: true` to the invertedIndexConfig")
 	})
 }
 

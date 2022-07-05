@@ -39,6 +39,7 @@ type fakeSchemaManager struct {
 		toClass   string
 	}
 	GetSchemaResponse schema.Schema
+	GetschemaErr      error
 }
 
 func (f *fakeSchemaManager) UpdatePropertyAddDataType(ctx context.Context, principal *models.Principal,
@@ -56,7 +57,7 @@ func (f *fakeSchemaManager) UpdatePropertyAddDataType(ctx context.Context, princ
 }
 
 func (f *fakeSchemaManager) GetSchema(principal *models.Principal) (schema.Schema, error) {
-	return f.GetSchemaResponse, nil
+	return f.GetSchemaResponse, f.GetschemaErr
 }
 
 func (f *fakeSchemaManager) AddClass(ctx context.Context, principal *models.Principal,
@@ -94,14 +95,16 @@ func (f *fakeSchemaManager) AddClassProperty(ctx context.Context, principal *mod
 	return nil
 }
 
-type fakeLocks struct{}
+type fakeLocks struct {
+	Err error
+}
 
 func (f *fakeLocks) LockConnector() (func() error, error) {
-	return func() error { return nil }, nil
+	return func() error { return nil }, f.Err
 }
 
 func (f *fakeLocks) LockSchema() (func() error, error) {
-	return func() error { return nil }, nil
+	return func() error { return nil }, f.Err
 }
 
 type fakeVectorizerProvider struct {
@@ -126,20 +129,31 @@ func (f *fakeVectorizer) Corpi(ctx context.Context, corpi []string) ([]float32, 
 	panic("not implemented")
 }
 
-type fakeAuthorizer struct{}
+type fakeAuthorizer struct {
+	Err error
+}
 
 func (f *fakeAuthorizer) Authorize(principal *models.Principal, verb, resource string) error {
-	return nil
+	return f.Err
 }
 
 type fakeVectorRepo struct {
 	mock.Mock
 }
 
-func (f *fakeVectorRepo) Exists(ctx context.Context,
+func (f *fakeVectorRepo) Exists(ctx context.Context, class string,
 	id strfmt.UUID) (bool, error) {
-	args := f.Called(id)
+	args := f.Called(class, id)
 	return args.Bool(0), args.Error(1)
+}
+
+func (f *fakeVectorRepo) Object(ctx context.Context, cls string,
+	id strfmt.UUID, props search.SelectProperties, additional additional.Properties) (*search.Result, error) {
+	args := f.Called(cls, id, props, additional)
+	if args.Get(0) != nil {
+		return args.Get(0).(*search.Result), args.Error(1)
+	}
+	return nil, args.Error(1)
 }
 
 func (f *fakeVectorRepo) ObjectByID(ctx context.Context,
@@ -151,9 +165,9 @@ func (f *fakeVectorRepo) ObjectByID(ctx context.Context,
 	return nil, args.Error(1)
 }
 
-func (f *fakeVectorRepo) ObjectSearch(ctx context.Context, offset, limit int,
-	filters *filters.LocalFilter, additional additional.Properties) (search.Results, error) {
-	args := f.Called(offset, limit, filters, additional)
+func (f *fakeVectorRepo) ObjectSearch(ctx context.Context, offset, limit int, filters *filters.LocalFilter,
+	sort []filters.Sort, additional additional.Properties) (search.Results, error) {
+	args := f.Called(offset, limit, sort, filters, additional)
 	return args.Get(0).([]search.Result), args.Error(1)
 }
 
@@ -173,6 +187,11 @@ func (f *fakeVectorRepo) AddBatchReferences(ctx context.Context, batch BatchRefe
 	return batch, args.Error(0)
 }
 
+func (f *fakeVectorRepo) BatchDeleteObjects(ctx context.Context, params BatchDeleteParams) (BatchDeleteResult, error) {
+	args := f.Called(params)
+	return args.Get(0).(BatchDeleteResult), args.Error(1)
+}
+
 func (f *fakeVectorRepo) Merge(ctx context.Context, merge MergeDocument) error {
 	args := f.Called(merge)
 	return args.Error(0)
@@ -187,7 +206,7 @@ func (f *fakeVectorRepo) DeleteObject(ctx context.Context,
 func (f *fakeVectorRepo) AddReference(ctx context.Context,
 	class string, source strfmt.UUID, prop string,
 	ref *models.SingleRef) error {
-	args := f.Called(source, prop, ref)
+	args := f.Called(class, source, prop, ref)
 	return args.Error(0)
 }
 

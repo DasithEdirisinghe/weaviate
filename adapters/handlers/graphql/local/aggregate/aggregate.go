@@ -28,7 +28,7 @@ type ModulesProvider interface {
 	ExtractSearchParams(arguments map[string]interface{}, className string) map[string]interface{}
 }
 
-// Build the Aggreate Kinds schema
+// Build the Aggregate Kinds schema
 func Build(dbSchema *schema.Schema, config config.Config,
 	modulesProvider ModulesProvider) (*graphql.Field, error) {
 	if len(dbSchema.Objects.Classes) == 0 {
@@ -124,6 +124,10 @@ func classField(class *models.Class, description string,
 			},
 			"nearVector": nearVectorArgument(class.Class),
 			"nearObject": nearObjectArgument(class.Class),
+			"objectLimit": &graphql.ArgumentConfig{
+				Description: descriptions.First,
+				Type:        graphql.Int,
+			},
 		},
 		Resolve: makeResolveClass(modulesProvider, class),
 	}
@@ -214,7 +218,7 @@ func classPropertyField(dataType schema.DataType, class *models.Class, property 
 	case schema.DataTypeBoolean:
 		return makePropertyField(class, property, booleanPropertyFields)
 	case schema.DataTypeDate:
-		return makePropertyField(class, property, nonNumericPropertyFields)
+		return makePropertyField(class, property, datePropertyFields)
 	case schema.DataTypeCRef:
 		return makePropertyField(class, property, referencePropertyFields)
 	case schema.DataTypeGeoCoordinates:
@@ -232,7 +236,7 @@ func classPropertyField(dataType schema.DataType, class *models.Class, property 
 	case schema.DataTypeBooleanArray:
 		return makePropertyField(class, property, booleanPropertyFields)
 	case schema.DataTypeDateArray:
-		return makePropertyField(class, property, nonNumericPropertyFields)
+		return makePropertyField(class, property, datePropertyFields)
 	default:
 		return nil, fmt.Errorf(schema.ErrorNoSuchDatatype+": %s", dataType)
 	}
